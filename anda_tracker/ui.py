@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
@@ -46,8 +47,12 @@ from .wps import (
 
 
 def app_data_dir() -> Path:
-    """将本机配置和加密数据库固定保存在源码项目目录。"""
-    return Path(__file__).resolve().parents[1] / "data"
+    """将本机配置放在源码项目或EXE旁边的data目录。"""
+    if getattr(sys, "frozen", False):
+        root = Path(sys.executable).resolve().parent
+    else:
+        root = Path(__file__).resolve().parents[1]
+    return root / "data"
 
 
 class LoginWorker(QThread):

@@ -8,7 +8,6 @@ build/
 *.spec
 data/
 packages/
-AndaFbaTracker.exe
 *.log
 .env
 .env.*
