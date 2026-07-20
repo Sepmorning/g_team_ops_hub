@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
@@ -47,12 +46,8 @@ from .wps import (
 
 
 def app_data_dir() -> Path:
-    """将非敏感配置放在项目/打包程序旁，便于整体迁移。"""
-    if getattr(sys, "frozen", False):
-        root = Path(sys.executable).resolve().parent
-    else:
-        root = Path(__file__).resolve().parents[1]
-    return root / "data"
+    """将本机配置和加密数据库固定保存在源码项目目录。"""
+    return Path(__file__).resolve().parents[1] / "data"
 
 
 class LoginWorker(QThread):
@@ -171,6 +166,9 @@ class WpsSyncWorker(QThread):
 
     def run(self) -> None:
         try:
+            # 每次写入前重新读取 active_area。用户可能在连接WPS后继续添加
+            # FBA行，不能沿用连接时保存的旧范围。
+            self.binding = self.client.validate_and_bind()
             summary = self.client.sync_tracking_results(self.binding, self.results)
             self.completed.emit(True, "", summary.message, summary)
         except CarrierError as exc:
@@ -271,16 +269,16 @@ class MainWindow(QMainWindow):
         self.wps_share_url_edit = QLineEdit()
         self.wps_share_url_edit.setPlaceholderText("https://www.kdocs.cn/l/…")
         self.wps_fba_col_edit = QLineEdit()
-        self.wps_fba_col_edit.setPlaceholderText("例如 E；请查看 US-FBA 第一行的列字母")
+        self.wps_fba_col_edit.setPlaceholderText("例如 A；仅首次填写，表头文字不影响")
         self.wps_fba_col_edit.setMaximumWidth(260)
         self.wps_route_col_edit = QLineEdit()
-        self.wps_route_col_edit.setPlaceholderText("例如 Y；“货代最新路由信息”所在列")
+        self.wps_route_col_edit.setPlaceholderText("例如 I；仅首次填写，表头文字不影响")
         self.wps_route_col_edit.setMaximumWidth(260)
         wps_layout.addRow("APPID", self.wps_app_id_edit)
         wps_layout.addRow("APPKEY", self.wps_app_secret_edit)
         wps_layout.addRow("共享表链接", self.wps_share_url_edit)
-        wps_layout.addRow("FBA号列", self.wps_fba_col_edit)
-        wps_layout.addRow("路由信息列", self.wps_route_col_edit)
+        wps_layout.addRow("FBA号列（首次）", self.wps_fba_col_edit)
+        wps_layout.addRow("路由信息列（首次）", self.wps_route_col_edit)
         wps_controls = QHBoxLayout()
         self.wps_connect_button = QPushButton("安全保存并连接 WPS")
         self.wps_connect_button.clicked.connect(self.save_and_connect_wps)
@@ -724,6 +722,9 @@ class MainWindow(QMainWindow):
     ) -> None:
         self.query_button.setEnabled(True)
         if success:
+            if self.wps_sync_worker is not None:
+                self.wps_binding = self.wps_sync_worker.binding
+                self.database.save_wps_binding(self.wps_binding)
             self._set_wps_status(True, "", "US-FBA同步完成：" + message)
             self.statusBar().showMessage("物流查询及 WPS 更新完成：" + message)
             if summary and (summary.duplicate_rows or summary.failures):

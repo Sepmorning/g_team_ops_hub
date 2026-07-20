@@ -3,7 +3,7 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VenvDirectory = Join-Path $ProjectRoot ".venv"
 $VenvPython = Join-Path $VenvDirectory "Scripts\python.exe"
 $WheelDirectory = Join-Path $ProjectRoot "packages\wheels"
-$Requirements = Join-Path $ProjectRoot "requirements-build.txt"
+$Requirements = Join-Path $ProjectRoot "requirements-dev.txt"
 
 if (-not (Test-Path -LiteralPath $WheelDirectory)) {
     throw "未找到 packages\wheels。请先在网络好的电脑运行 准备离线依赖.ps1，再复制 packages 文件夹。"

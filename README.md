@@ -4,19 +4,9 @@
 
 易通使用官网后台接口查询。首次登录或会话失效时，程序会显示官网图形验证码，需人工输入一次；有效会话会加密保存并在下次启动时自动验证，不识别或绕过验证码。
 
-## 推荐启动方式
+## 启动方式
 
-直接双击项目根目录的：
-
-```text
-AndaFbaTracker.exe
-```
-
-也可以双击 `启动项目.bat`。
-
-## 开发方式启动
-
-项目的全部 Python 依赖保存在项目自己的 `.venv` 中，不使用全局 Python 环境：
+当前项目保持正常源码开发形式，不生成 EXE。项目的全部 Python 依赖保存在自己的 `.venv` 中，不使用全局 Python 环境。安装完成后可以双击 `启动项目.bat`，也可以执行：
 
 ```powershell
 .\.venv\Scripts\python.exe main.py
@@ -57,7 +47,7 @@ AndaFbaTracker.exe
 .\离线安装项目.ps1
 ```
 
-脚本会在项目内部创建 `.venv`、从本地安装运行/测试/打包依赖，并自动运行测试。离线包与生成它的 Python 版本及 Windows 架构有关；两台电脑建议都使用64位 Python 3.12。
+脚本会在项目内部创建 `.venv`、从本地安装运行和测试依赖，并自动运行测试。离线包与生成它的 Python 版本及 Windows 架构有关；两台电脑建议都使用64位 Python 3.12。
 
 ## 项目结构
 
@@ -67,20 +57,15 @@ anda_fba_tracker/
 ├─ anda_tracker/        程序源代码
 ├─ data/                SQLite 数据库和配置
 ├─ tests/               自动化测试
-├─ AndaFbaTracker.exe   当前可运行版本
-├─ 启动项目.bat          快捷启动入口
+├─ 启动项目.bat          源码快捷启动入口
 ├─ main.py              源代码入口
 ├─ requirements.txt     运行依赖
 ├─ requirements-dev.txt 测试依赖
-├─ requirements-build.txt 打包依赖
 ├─ setup_project.ps1    建立/更新项目内环境
 ├─ 准备离线依赖.ps1      网络好时下载离线安装包
 ├─ 离线安装项目.ps1      从本地安装包建立项目环境
-├─ build_exe.ps1        重新生成根目录 EXE
 └─ README.md            本说明
 ```
-
-项目不再生成或保留可移植 ZIP。打包产生的临时目录会在成功后自动清理。
 
 尚未实施但已经确认的前后端、多页面行为记录在 `后续开发约束.md`，后续开发前应先核对该文件。
 
@@ -105,11 +90,13 @@ anda_fba_tracker/
 
 1. 在 WPS 开放平台的企业自建应用中启用用户权限 `kso.sheets.readwrite` 和 `kso.file.read`。
 2. 将本机回调地址设为 `http://127.0.0.1:8765/wps/callback`，并保持接口签名关闭。
-3. 启动程序，在“WPS 共享表”区域填写 APPID、APPKEY、共享链接，以及 `US-FBA` 中“FBA号”和“货代最新路由信息”所在的 Excel 列字母（例如 E、Y）。
+3. 启动程序，在“WPS 共享表”区域填写 APPID、APPKEY、共享链接，以及 `US-FBA` 中FBA和路由所在的 Excel 列字母（例如 A、I）。列字母只需首次填写，表头文字可以是 `FBA`、`FBA号`、`路由` 或其他名称。
 4. 点击“安全保存并连接 WPS”，在浏览器中用有该文件编辑权限的 WPS 账号完成授权。
 5. 程序会验证文件、定位唯一的 `US-FBA` 子表，并检查所填列是否处于工作表使用范围内。显示“已连接”后即可查询物流。
 
-WPS 传统 `.xlsx` 的“查找选区”接口会把第一行作为字段定义并排除在结果之外，因此服务端无法读回第一行文本来自动识别列名。列字母只需首次填写；如果以后移动了这两列，在程序中同步修改列字母并点击“重新验证共享表”即可，不需要重新创建应用。
+WPS 传统 `.xlsx` 的“查找选区”接口会把第一行作为字段定义并排除在结果之外，因此服务端无法可靠读回第一行文本来自动识别列名。当前免费企业权限下，文件下载接口也不可用，所以不能安全地根据表头自动选列。程序不会猜测并写入可能错误的列。列字母只需首次填写；如果以后移动了这两列，在程序中同步修改列字母并点击“重新验证共享表”即可，不需要重新创建应用。
+
+程序会在每次同步前重新读取 `US-FBA` 的最新使用范围，因此连接WPS后继续新增FBA行，也不会因为沿用旧范围而漏掉尾部数据。
 
 APPKEY、访问令牌和刷新令牌会使用 Windows DPAPI 加密后保存到 `data/app.db`，不会以明文写入代码、配置或日志。共享链接和 APPID 不是密码，会直接保存在数据库中。
 
@@ -129,11 +116,3 @@ APPKEY、访问令牌和刷新令牌会使用 Windows DPAPI 加密后保存到 `
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m compileall -q anda_tracker main.py tests
 ```
-
-## 重新生成 EXE
-
-```powershell
-.\build_exe.ps1
-```
-
-生成结果会直接覆盖项目根目录的 `AndaFbaTracker.exe`，不会生成 ZIP。

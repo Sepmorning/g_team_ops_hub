@@ -101,11 +101,48 @@ def test_validation_uses_sheet_permission_without_file_meta_entitlement():
     client._api_request = fake_request
     binding = client.validate_and_bind()
     assert binding.worksheet_id == 9
-    assert binding.max_row == 80
-    assert binding.max_col == 12
+    assert binding.max_row == 12
+    assert binding.max_col == 80
     assert binding.fba_col == 4
     assert binding.route_col == 10
     assert calls == [("GET", "/sheets/file123/worksheets")]
+
+
+def test_validation_does_not_treat_last_column_as_last_row():
+    client = WpsClient(
+        WpsCredentials(
+            "appid", "secret", "https://www.kdocs.cn/l/file123", fba_col=0, route_col=8
+        ),
+        tokens=WpsTokens("access", "refresh", 9999999999),
+    )
+
+    def fake_request(_method, _path, **_kwargs):
+        return {
+            "code": 0,
+            "data": {
+                "sheets": [
+                    {
+                        "sheet_id": 1,
+                        "name": "US-FBA",
+                        "max_row": 16383,
+                        "max_col": 1048575,
+                        "active_area": {
+                            "row_from": 0,
+                            "row_to": 10,
+                            "col_from": 0,
+                            "col_to": 8,
+                        },
+                    }
+                ]
+            },
+        }
+
+    client._api_request = fake_request
+    binding = client.validate_and_bind()
+    assert binding.max_row == 10
+    assert binding.max_col == 8
+    assert binding.fba_col == 0
+    assert binding.route_col == 8
 
 
 def test_find_cells_uses_valid_non_empty_filter_and_one_based_page():

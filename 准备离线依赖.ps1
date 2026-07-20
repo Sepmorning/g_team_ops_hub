@@ -2,12 +2,15 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $WheelDirectory = Join-Path $ProjectRoot "packages\wheels"
-$Requirements = Join-Path $ProjectRoot "requirements-build.txt"
+$Requirements = Join-Path $ProjectRoot "requirements-dev.txt"
 
 if (-not (Test-Path -LiteralPath $VenvPython)) {
     throw "请先运行 setup_project.ps1 建立项目内环境。"
 }
 
+if (Test-Path -LiteralPath $WheelDirectory) {
+    Remove-Item -LiteralPath $WheelDirectory -Recurse -Force
+}
 New-Item -ItemType Directory -Path $WheelDirectory -Force | Out-Null
 
 & $VenvPython -m pip download `

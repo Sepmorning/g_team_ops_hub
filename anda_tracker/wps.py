@@ -417,13 +417,14 @@ class WpsClient:
         active_area = (
             sheet.get("active_area") if isinstance(sheet.get("active_area"), dict) else {}
         )
-        # 工作表列表接口的 active_area 方向与 range_data 单元格坐标相反：
-        # active_area.col_to 对应实际行号，active_area.row_to 对应实际列号。
+        # active_area 与 range_data 使用相同坐标：row_to 是最后使用行，
+        # col_to 是最后使用列。max_row/max_col 字段返回的是工作表容量，
+        # 不能用来判断当前数据范围。
         actual_max_row = max(
-            1, int(active_area.get("col_to") or sheet.get("max_row") or 1)
+            1, min(1048575, int(active_area.get("row_to") or 1))
         )
         actual_max_col = max(
-            0, min(255, int(active_area.get("row_to") or sheet.get("max_col") or 0))
+            0, min(16383, int(active_area.get("col_to") or 0))
         )
         if self.credentials.fba_col is None or self.credentials.route_col is None:
             raise ConfigurationError("请填写 US-FBA 的 FBA号列和货代最新路由信息列")

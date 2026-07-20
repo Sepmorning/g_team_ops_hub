@@ -7,6 +7,5 @@ if (-not (Test-Path -LiteralPath $VenvPython)) {
 }
 
 & $VenvPython -m pip install --upgrade pip
-& $VenvPython -m pip install -r (Join-Path $ProjectRoot "requirements-build.txt")
+& $VenvPython -m pip install -r (Join-Path $ProjectRoot "requirements-dev.txt")
 Write-Host "项目内运行环境已安装：$ProjectRoot\.venv"
-
