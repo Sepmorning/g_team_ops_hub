@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .airscript import AirScriptConfig
 from .errors import ConfigurationError
 from .wps import DEFAULT_REDIRECT_URI, WpsCredentials, WpsSheetBinding, WpsTokens
 
@@ -142,6 +143,18 @@ class ProjectDatabase:
                     max_col INTEGER,
                     fba_col INTEGER,
                     route_col INTEGER,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS airscript_settings (
+                    profile_id TEXT PRIMARY KEY,
+                    share_url TEXT NOT NULL,
+                    webhook_url TEXT NOT NULL,
+                    api_token_ciphertext TEXT NOT NULL,
+                    sheet_name TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -398,6 +411,60 @@ class ProjectDatabase:
                 WHERE profile_id=?
                 """,
                 (self.profile_id,),
+            )
+
+    def save_airscript_config(self, config: AirScriptConfig) -> None:
+        share_url = config.share_url.strip()
+        webhook_url = config.webhook_url.strip()
+        sheet_name = config.sheet_name.strip()
+        if not share_url or not webhook_url or not config.api_token or not sheet_name:
+            raise ConfigurationError("共享表链接、AirScript webhook和脚本令牌不能为空")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO airscript_settings(
+                    profile_id, share_url, webhook_url, api_token_ciphertext,
+                    sheet_name, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(profile_id) DO UPDATE SET
+                    share_url=excluded.share_url,
+                    webhook_url=excluded.webhook_url,
+                    api_token_ciphertext=excluded.api_token_ciphertext,
+                    sheet_name=excluded.sheet_name,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    self.profile_id,
+                    share_url,
+                    webhook_url,
+                    protect_secret(config.api_token),
+                    sheet_name,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def load_airscript_config(self) -> AirScriptConfig | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT share_url, webhook_url, api_token_ciphertext, sheet_name
+                FROM airscript_settings WHERE profile_id=?
+                """,
+                (self.profile_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return AirScriptConfig(
+            share_url=row[0],
+            webhook_url=row[1],
+            api_token=unprotect_secret(row[2]),
+            sheet_name=row[3],
+        )
+
+    def delete_airscript_config(self) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM airscript_settings WHERE profile_id=?", (self.profile_id,)
             )
 
     def max_query_count(self) -> int:

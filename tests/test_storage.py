@@ -1,5 +1,6 @@
 import sqlite3
 
+from anda_tracker.airscript import AirScriptConfig
 from anda_tracker.storage import ProjectDatabase, SYSTEM_MAX_QUERY_COUNT
 from anda_tracker.wps import WpsCredentials, WpsSheetBinding, WpsTokens
 
@@ -76,3 +77,36 @@ def test_wps_appkey_and_oauth_tokens_are_encrypted(tmp_path):
     assert database.load_wps_binding().worksheet_name == "US-FBA"
     assert database.load_wps_binding().fba_col == 4
     assert database.load_wps_binding().route_col == 24
+
+
+def test_airscript_token_is_encrypted_and_config_can_be_loaded(tmp_path):
+    database = ProjectDatabase(tmp_path / "app.db")
+    config = AirScriptConfig(
+        share_url="https://www.kdocs.cn/l/share123",
+        webhook_url=(
+            "https://www.kdocs.cn/api/v3/ide/file/file-id/"
+            "script/script-id/sync_task"
+        ),
+        api_token="placeholder-airscript-secret",
+    )
+    database.save_airscript_config(config)
+    with sqlite3.connect(database.path) as connection:
+        row = connection.execute(
+            "SELECT api_token_ciphertext FROM airscript_settings"
+        ).fetchone()
+    assert "placeholder-airscript-secret" not in row[0]
+    loaded = database.load_airscript_config()
+    assert loaded == config
+
+
+def test_deleting_airscript_config_does_not_touch_legacy_wps_settings(tmp_path):
+    database = ProjectDatabase(tmp_path / "app.db")
+    database.save_airscript_config(
+        AirScriptConfig(
+            "https://www.kdocs.cn/l/share123",
+            "https://www.kdocs.cn/api/v3/ide/file/file/script/script/sync_task",
+            "placeholder-token",
+        )
+    )
+    database.delete_airscript_config()
+    assert database.load_airscript_config() is None

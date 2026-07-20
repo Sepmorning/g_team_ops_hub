@@ -3,8 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QPixmap
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -24,6 +24,12 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from .airscript import (
+    AirScriptBinding,
+    AirScriptClient,
+    AirScriptConfig,
+    AirScriptSyncSummary,
+)
 from .client import AndaClient
 from .chaohong import ChaoHongClient, ChaoHongQueryService
 from .combined import CombinedQueryService
@@ -34,16 +40,6 @@ from .service import AndaQueryService
 from .settings import AppSettings
 from .storage import ProjectDatabase, StoredCredentials
 from .yitong import CaptchaChallenge, YiTongClient, YiTongQueryService
-from .wps import (
-    DEFAULT_REDIRECT_URI,
-    WpsClient,
-    WpsCredentials,
-    WpsSheetBinding,
-    WpsSyncSummary,
-    excel_column_to_index,
-    index_to_excel_column,
-    perform_local_authorization,
-)
 
 
 def app_data_dir() -> Path:
@@ -139,47 +135,43 @@ class YiTongAuthWorker(QThread):
             self.completed.emit(False, "unknown", "登录时发生未预期错误", "")
 
 
-class WpsConnectWorker(QThread):
-    authorization_url = pyqtSignal(str)
+class AirScriptConnectWorker(QThread):
     completed = pyqtSignal(bool, str, str, object)
 
-    def __init__(self, client: WpsClient, authorize: bool):
+    def __init__(self, client: AirScriptClient):
         super().__init__()
         self.client = client
-        self.authorize = authorize
 
     def run(self) -> None:
         try:
-            if self.authorize:
-                perform_local_authorization(self.client, self.authorization_url.emit)
-            binding = self.client.validate_and_bind()
-            self.completed.emit(True, "", "已连接并验证 US-FBA", binding)
+            binding = self.client.validate()
+            message = (
+                f"已连接 {binding.sheet_name}，自动识别 FBA列 {binding.fba_column}，"
+                f"路由列 {binding.route_column}"
+            )
+            self.completed.emit(True, "", message, binding)
         except CarrierError as exc:
             self.completed.emit(False, exc.category, exc.user_message, None)
         except Exception:
-            self.completed.emit(False, "unknown", "连接 WPS 时发生未预期错误", None)
+            self.completed.emit(False, "unknown", "连接 AirScript 时发生未预期错误", None)
 
 
-class WpsSyncWorker(QThread):
+class AirScriptSyncWorker(QThread):
     completed = pyqtSignal(bool, str, str, object)
 
-    def __init__(self, client: WpsClient, binding: WpsSheetBinding, results: list[TrackingResult]):
+    def __init__(self, client: AirScriptClient, results: list[TrackingResult]):
         super().__init__()
         self.client = client
-        self.binding = binding
         self.results = results
 
     def run(self) -> None:
         try:
-            # 每次写入前重新读取 active_area。用户可能在连接WPS后继续添加
-            # FBA行，不能沿用连接时保存的旧范围。
-            self.binding = self.client.validate_and_bind()
-            summary = self.client.sync_tracking_results(self.binding, self.results)
+            summary = self.client.sync_tracking_results(self.results)
             self.completed.emit(True, "", summary.message, summary)
         except CarrierError as exc:
             self.completed.emit(False, exc.category, exc.user_message, None)
         except Exception:
-            self.completed.emit(False, "unknown", "更新 WPS 共享表时发生未预期错误", None)
+            self.completed.emit(False, "unknown", "AirScript 更新共享表时发生未预期错误", None)
 
 
 class MainWindow(QMainWindow):
@@ -196,10 +188,10 @@ class MainWindow(QMainWindow):
         self.yitong_captcha_worker: YiTongCaptchaWorker | None = None
         self.yitong_auth_worker: YiTongAuthWorker | None = None
         self.yitong_challenge: CaptchaChallenge | None = None
-        self.wps_client: WpsClient | None = None
-        self.wps_binding: WpsSheetBinding | None = None
-        self.wps_connect_worker: WpsConnectWorker | None = None
-        self.wps_sync_worker: WpsSyncWorker | None = None
+        self.airscript_client: AirScriptClient | None = None
+        self.airscript_binding: AirScriptBinding | None = None
+        self.airscript_connect_worker: AirScriptConnectWorker | None = None
+        self.airscript_sync_worker: AirScriptSyncWorker | None = None
         self.query_worker: QueryWorker | None = None
         self._build_ui()
         self._load_accounts_and_auto_login()
@@ -264,35 +256,31 @@ class MainWindow(QMainWindow):
         yitong_layout.addRow(yitong_buttons)
         layout.addWidget(yitong_group)
 
-        wps_group = QGroupBox("WPS共享表（仅更新 US-FBA 的“货代最新路由信息”）")
+        wps_group = QGroupBox(
+            "WPS AirScript（自动识别 US-FBA 的 FBA列和“货代最新路由信息”列）"
+        )
         wps_layout = QFormLayout(wps_group)
-        self.wps_app_id_edit = QLineEdit()
-        self.wps_app_id_edit.setPlaceholderText("请输入企业自建应用 APPID")
-        self.wps_app_secret_edit = QLineEdit()
-        self.wps_app_secret_edit.setEchoMode(QLineEdit.Password)
-        self.wps_app_secret_edit.setPlaceholderText("请输入 APPKEY；仅加密保存在本机数据库")
-        self.wps_share_url_edit = QLineEdit()
-        self.wps_share_url_edit.setPlaceholderText("https://www.kdocs.cn/l/…")
-        self.wps_fba_col_edit = QLineEdit()
-        self.wps_fba_col_edit.setPlaceholderText("例如 A；仅首次填写，表头文字不影响")
-        self.wps_fba_col_edit.setMaximumWidth(260)
-        self.wps_route_col_edit = QLineEdit()
-        self.wps_route_col_edit.setPlaceholderText("例如 I；仅首次填写，表头文字不影响")
-        self.wps_route_col_edit.setMaximumWidth(260)
-        wps_layout.addRow("APPID", self.wps_app_id_edit)
-        wps_layout.addRow("APPKEY", self.wps_app_secret_edit)
-        wps_layout.addRow("共享表链接", self.wps_share_url_edit)
-        wps_layout.addRow("FBA号列（首次）", self.wps_fba_col_edit)
-        wps_layout.addRow("路由信息列（首次）", self.wps_route_col_edit)
+        self.airscript_share_url_edit = QLineEdit()
+        self.airscript_share_url_edit.setPlaceholderText("https://www.kdocs.cn/l/…")
+        self.airscript_webhook_edit = QLineEdit()
+        self.airscript_webhook_edit.setPlaceholderText(
+            "从“文档共享脚本”菜单复制的 https://www.kdocs.cn/api/v3/ide/…/sync_task"
+        )
+        self.airscript_token_edit = QLineEdit()
+        self.airscript_token_edit.setEchoMode(QLineEdit.Password)
+        self.airscript_token_edit.setPlaceholderText("请输入脚本令牌；仅加密保存在本机数据库")
+        wps_layout.addRow("共享表链接", self.airscript_share_url_edit)
+        wps_layout.addRow("脚本 webhook", self.airscript_webhook_edit)
+        wps_layout.addRow("脚本令牌", self.airscript_token_edit)
         wps_controls = QHBoxLayout()
-        self.wps_connect_button = QPushButton("安全保存并连接 WPS")
-        self.wps_connect_button.clicked.connect(self.save_and_connect_wps)
-        self.wps_revalidate_button = QPushButton("重新验证共享表")
-        self.wps_revalidate_button.clicked.connect(self.revalidate_wps)
-        self.wps_status = QLabel("WPS状态：未配置")
-        wps_controls.addWidget(self.wps_connect_button)
-        wps_controls.addWidget(self.wps_revalidate_button)
-        wps_controls.addWidget(self.wps_status, 1)
+        self.airscript_connect_button = QPushButton("安全保存并测试 AirScript")
+        self.airscript_connect_button.clicked.connect(self.save_and_connect_airscript)
+        self.airscript_revalidate_button = QPushButton("重新测试")
+        self.airscript_revalidate_button.clicked.connect(self.revalidate_airscript)
+        self.airscript_status = QLabel("AirScript状态：未配置")
+        wps_controls.addWidget(self.airscript_connect_button)
+        wps_controls.addWidget(self.airscript_revalidate_button)
+        wps_controls.addWidget(self.airscript_status, 1)
         wps_layout.addRow(wps_controls)
         layout.addWidget(wps_group)
 
@@ -337,36 +325,28 @@ class MainWindow(QMainWindow):
             self.password_edit.clear()
             self._start_login(credentials, "正在自动登录…")
         self._load_yitong_account()
-        self._load_wps_settings()
+        self._load_airscript_settings()
 
-    def _load_wps_settings(self) -> None:
+    def _load_airscript_settings(self) -> None:
         try:
-            credentials = self.database.load_wps_credentials()
-            tokens = self.database.load_wps_tokens()
-            binding = self.database.load_wps_binding()
+            config = self.database.load_airscript_config()
         except ConfigurationError as exc:
-            self._set_wps_status(False, exc.category, exc.user_message)
+            self._set_airscript_status(False, exc.category, exc.user_message)
             return
-        if credentials is None:
-            self._set_wps_status(False, "configuration", "请填写共享表链接和 WPS 应用信息")
+        if config is None:
+            self._set_airscript_status(
+                False, "configuration", "请填写共享表链接、脚本 webhook和脚本令牌"
+            )
             return
-        self.wps_app_id_edit.setText(credentials.app_id)
-        self.wps_share_url_edit.setText(credentials.share_url)
-        if credentials.fba_col is not None:
-            self.wps_fba_col_edit.setText(index_to_excel_column(credentials.fba_col))
-        if credentials.route_col is not None:
-            self.wps_route_col_edit.setText(index_to_excel_column(credentials.route_col))
-        self.wps_app_secret_edit.clear()
-        self.wps_binding = binding
-        if tokens is None:
-            self._set_wps_status(False, "configuration", "配置已保存，请连接 WPS")
+        self.airscript_share_url_edit.setText(config.share_url)
+        self.airscript_webhook_edit.setText(config.webhook_url)
+        self.airscript_token_edit.clear()
+        try:
+            client = AirScriptClient(config, retries=self.settings.retries)
+        except ConfigurationError as exc:
+            self._set_airscript_status(False, exc.category, exc.user_message)
             return
-        self.wps_client = WpsClient(
-            credentials,
-            tokens=tokens,
-            token_callback=self.database.save_wps_tokens,
-        )
-        self._start_wps_connection(self.wps_client, authorize=False, message="正在自动验证…")
+        self._start_airscript_connection(client, "正在自动验证…")
 
     def _load_yitong_account(self) -> None:
         try:
@@ -553,99 +533,88 @@ class MainWindow(QMainWindow):
         self._set_yitong_status(False, "configuration", "未配置账号")
         self.refresh_yitong_captcha()
 
-    def _current_wps_credentials(self) -> WpsCredentials:
-        app_id = self.wps_app_id_edit.text().strip()
-        share_url = self.wps_share_url_edit.text().strip()
-        app_secret = self.wps_app_secret_edit.text()
-        if not app_secret:
-            saved = self.database.load_wps_credentials()
-            if saved and saved.app_id == app_id:
-                app_secret = saved.app_secret
-        return WpsCredentials(
-            app_id=app_id,
-            app_secret=app_secret,
+    def _current_airscript_config(self) -> AirScriptConfig:
+        share_url = self.airscript_share_url_edit.text().strip()
+        webhook_url = self.airscript_webhook_edit.text().strip()
+        api_token = self.airscript_token_edit.text()
+        if not api_token:
+            saved = self.database.load_airscript_config()
+            if (
+                saved
+                and saved.share_url == share_url
+                and saved.webhook_url == webhook_url
+            ):
+                api_token = saved.api_token
+        return AirScriptConfig(
             share_url=share_url,
-            redirect_uri=DEFAULT_REDIRECT_URI,
-            fba_col=excel_column_to_index(self.wps_fba_col_edit.text()),
-            route_col=excel_column_to_index(self.wps_route_col_edit.text()),
+            webhook_url=webhook_url,
+            api_token=api_token,
         )
 
-    def save_and_connect_wps(self) -> None:
+    def save_and_connect_airscript(self) -> None:
         try:
-            credentials = self._current_wps_credentials()
-            self.database.save_wps_credentials(credentials)
+            config = self._current_airscript_config()
+            client = AirScriptClient(config, retries=self.settings.retries)
+            self.database.save_airscript_config(config)
         except ConfigurationError as exc:
-            QMessageBox.critical(self, "WPS配置保存失败", exc.user_message)
+            QMessageBox.critical(self, "AirScript配置保存失败", exc.user_message)
             return
-        self.wps_app_secret_edit.clear()
-        self.wps_binding = None
-        self.wps_client = WpsClient(
-            credentials,
-            token_callback=self.database.save_wps_tokens,
-        )
-        self._start_wps_connection(self.wps_client, authorize=True, message="等待浏览器授权…")
+        self.airscript_token_edit.clear()
+        self.airscript_binding = None
+        self._start_airscript_connection(client, "正在测试脚本…")
 
-    def revalidate_wps(self) -> None:
+    def revalidate_airscript(self) -> None:
         try:
-            credentials = self._current_wps_credentials()
-            self.database.save_wps_credentials(credentials)
-            tokens = self.database.load_wps_tokens()
+            config = self._current_airscript_config()
+            client = AirScriptClient(config, retries=self.settings.retries)
+            self.database.save_airscript_config(config)
         except ConfigurationError as exc:
-            QMessageBox.critical(self, "WPS配置错误", exc.user_message)
+            QMessageBox.critical(self, "AirScript配置错误", exc.user_message)
             return
-        if tokens is None:
-            QMessageBox.information(self, "需要授权", "请先点击“安全保存并连接 WPS”。")
+        self.airscript_token_edit.clear()
+        self._start_airscript_connection(client, "正在重新测试…")
+
+    def _start_airscript_connection(self, client: AirScriptClient, message: str) -> None:
+        if self.airscript_connect_worker and self.airscript_connect_worker.isRunning():
             return
-        self.wps_client = WpsClient(
-            credentials,
-            tokens=tokens,
-            token_callback=self.database.save_wps_tokens,
-        )
-        self._start_wps_connection(self.wps_client, authorize=False, message="正在验证共享表…")
+        self.airscript_connect_button.setEnabled(False)
+        self.airscript_revalidate_button.setEnabled(False)
+        self.airscript_status.setText(f"AirScript状态：{message}")
+        self.airscript_status.setStyleSheet("color: #b36b00")
+        self.airscript_connect_worker = AirScriptConnectWorker(client)
+        self.airscript_connect_worker.completed.connect(self._airscript_connection_finished)
+        self.airscript_connect_worker.start()
 
-    def _start_wps_connection(self, client: WpsClient, authorize: bool, message: str) -> None:
-        if self.wps_connect_worker and self.wps_connect_worker.isRunning():
-            return
-        self.wps_connect_button.setEnabled(False)
-        self.wps_revalidate_button.setEnabled(False)
-        self.wps_status.setText(f"WPS状态：{message}")
-        self.wps_status.setStyleSheet("color: #b36b00")
-        self.wps_connect_worker = WpsConnectWorker(client, authorize)
-        self.wps_connect_worker.authorization_url.connect(self._open_wps_authorization)
-        self.wps_connect_worker.completed.connect(self._wps_connection_finished)
-        self.wps_connect_worker.start()
-
-    def _open_wps_authorization(self, url: str) -> None:
-        if not QDesktopServices.openUrl(QUrl(url)):
-            QMessageBox.warning(self, "无法打开浏览器", f"请手动打开以下地址完成授权：\n{url}")
-
-    def _wps_connection_finished(
-        self, success: bool, category: str, message: str, binding: WpsSheetBinding | None
+    def _airscript_connection_finished(
+        self, success: bool, category: str, message: str, binding: AirScriptBinding | None
     ) -> None:
-        self.wps_connect_button.setEnabled(True)
-        self.wps_revalidate_button.setEnabled(True)
+        self.airscript_connect_button.setEnabled(True)
+        self.airscript_revalidate_button.setEnabled(True)
         if success and binding is not None:
-            self.wps_client = self.wps_connect_worker.client if self.wps_connect_worker else self.wps_client
-            self.wps_binding = binding
-            self.database.save_wps_binding(binding)
-            self._set_wps_status(True, "", message)
-        else:
-            self.wps_binding = None
-            self._set_wps_status(False, category, message)
+            if self.airscript_connect_worker is not None:
+                self.airscript_client = self.airscript_connect_worker.client
+            self.airscript_binding = binding
+            self._set_airscript_status(True, "", message)
+            return
+        self.airscript_client = None
+        self.airscript_binding = None
+        self._set_airscript_status(False, category, message)
 
-    def _set_wps_status(self, success: bool, category: str, message: str) -> None:
+    def _set_airscript_status(self, success: bool, category: str, message: str) -> None:
         if success:
-            self.wps_status.setText(f"WPS状态：已连接 — {message}")
-            self.wps_status.setStyleSheet("color: green")
+            self.airscript_status.setText(f"AirScript状态：已连接 — {message}")
+            self.airscript_status.setStyleSheet("color: green")
             return
         label = {
             "network": "网络失败",
-            "authentication": "授权或权限失败",
-            "response": "接口响应异常",
+            "authentication": "令牌或权限失败",
+            "response": "脚本响应异常",
+            "server": "服务异常",
+            "rate_limit": "请求受限",
             "configuration": "未配置",
         }.get(category, "失败")
-        self.wps_status.setText(f"WPS状态：{label} — {message}")
-        self.wps_status.setStyleSheet("color: #b00020")
+        self.airscript_status.setText(f"AirScript状态：{label} — {message}")
+        self.airscript_status.setStyleSheet("color: #b00020")
 
     def start_query(self) -> None:
         parsed = parse_fba_input(self.fba_input.toPlainText())
@@ -711,38 +680,35 @@ class MainWindow(QMainWindow):
         query_message = (
             f"查询完成：成功 {succeeded}，未找到 {missing}，冲突 {conflict}，部分失败 {partial}，失败 {failed}"
         )
-        if self.wps_client and self.wps_binding:
-            self.statusBar().showMessage(query_message + "；正在更新 WPS US-FBA…")
-            self.wps_sync_worker = WpsSyncWorker(
-                self.wps_client, self.wps_binding, results
+        if self.airscript_client and self.airscript_binding:
+            self.statusBar().showMessage(query_message + "；正在通过 AirScript 更新 US-FBA…")
+            self.airscript_sync_worker = AirScriptSyncWorker(
+                self.airscript_client, results
             )
-            self.wps_sync_worker.completed.connect(self._wps_sync_finished)
-            self.wps_sync_worker.start()
+            self.airscript_sync_worker.completed.connect(self._airscript_sync_finished)
+            self.airscript_sync_worker.start()
         else:
             self.query_button.setEnabled(True)
-            self.statusBar().showMessage(query_message + "；WPS未连接，未写入共享表")
+            self.statusBar().showMessage(query_message + "；AirScript未连接，未写入共享表")
 
-    def _wps_sync_finished(
-        self, success: bool, category: str, message: str, summary: WpsSyncSummary | None
+    def _airscript_sync_finished(
+        self, success: bool, category: str, message: str, summary: AirScriptSyncSummary | None
     ) -> None:
         self.query_button.setEnabled(True)
         if success:
-            if self.wps_sync_worker is not None:
-                self.wps_binding = self.wps_sync_worker.binding
-                self.database.save_wps_binding(self.wps_binding)
-            self._set_wps_status(True, "", "US-FBA同步完成：" + message)
-            self.statusBar().showMessage("物流查询及 WPS 更新完成：" + message)
+            self._set_airscript_status(True, "", "US-FBA同步完成：" + message)
+            self.statusBar().showMessage("物流查询及 AirScript 更新完成：" + message)
             if summary and (summary.duplicate_rows or summary.failures):
                 details = []
                 if summary.duplicate_rows:
                     details.append("重复FBA：" + "、".join(summary.duplicate_rows[:10]))
                 if summary.failures:
                     details.append("失败：" + "、".join(summary.failures[:10]))
-                QMessageBox.warning(self, "WPS部分项目未更新", "\n".join(details))
+                QMessageBox.warning(self, "AirScript部分项目未更新", "\n".join(details))
             return
-        self._set_wps_status(False, category, message)
-        self.statusBar().showMessage("物流查询完成，但 WPS 更新失败：" + message)
-        QMessageBox.warning(self, "WPS更新失败", message)
+        self._set_airscript_status(False, category, message)
+        self.statusBar().showMessage("物流查询完成，但 AirScript 更新失败：" + message)
+        QMessageBox.warning(self, "AirScript更新失败", message)
 
 
 def run() -> int:
