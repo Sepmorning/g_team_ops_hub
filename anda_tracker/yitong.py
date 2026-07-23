@@ -219,6 +219,8 @@ class YiTongClient:
 
 
 class YiTongQueryService:
+    carrier = "易通"
+
     def __init__(
         self,
         client: YiTongClient,

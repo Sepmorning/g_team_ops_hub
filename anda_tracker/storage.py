@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import sqlite3
+import secrets
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,7 +11,6 @@ from pathlib import Path
 
 from .airscript import AirScriptConfig
 from .errors import ConfigurationError
-from .wps import DEFAULT_REDIRECT_URI, WpsCredentials, WpsSheetBinding, WpsTokens
 
 
 SYSTEM_MAX_QUERY_COUNT = 50
@@ -78,6 +78,15 @@ class StoredCredentials:
     password: str
 
 
+@dataclass(frozen=True)
+class StoredShop:
+    id: str
+    name: str
+    config: AirScriptConfig
+    created_at: str
+    updated_at: str
+
+
 class ProjectDatabase:
     """项目内 SQLite：账号按 profile/carrier 隔离，密码字段只保存 DPAPI 密文。"""
 
@@ -85,7 +94,28 @@ class ProjectDatabase:
         self.path = path
         self.profile_id = profile_id
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.shop_migration_backup_path = self._backup_before_shop_migration()
         self._initialize()
+
+    def _backup_before_shop_migration(self) -> Path | None:
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return None
+        with sqlite3.connect(self.path) as source:
+            tables = {
+                row[0]
+                for row in source.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "shops" in tables or "airscript_settings" not in tables:
+                return None
+            backup_dir = self.path.parent / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_path = backup_dir / f"app-before-shops-{stamp}.db"
+            with sqlite3.connect(backup_path) as target:
+                source.backup(target)
+            return backup_path
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
@@ -127,49 +157,65 @@ class ProjectDatabase:
             )
             connection.execute(
                 """
-                CREATE TABLE IF NOT EXISTS wps_settings (
-                    profile_id TEXT PRIMARY KEY,
-                    app_id TEXT NOT NULL,
-                    app_secret_ciphertext TEXT NOT NULL,
-                    share_url TEXT NOT NULL,
-                    redirect_uri TEXT NOT NULL,
-                    access_token_ciphertext TEXT,
-                    refresh_token_ciphertext TEXT,
-                    expires_at REAL,
-                    file_id TEXT,
-                    worksheet_id INTEGER,
-                    worksheet_name TEXT,
-                    max_row INTEGER,
-                    max_col INTEGER,
-                    fba_col INTEGER,
-                    route_col INTEGER,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS airscript_settings (
-                    profile_id TEXT PRIMARY KEY,
+                CREATE TABLE IF NOT EXISTS shops (
+                    id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    name TEXT NOT NULL COLLATE NOCASE,
                     share_url TEXT NOT NULL,
                     webhook_url TEXT NOT NULL,
                     api_token_ciphertext TEXT NOT NULL,
                     sheet_name TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(profile_id, name)
                 )
                 """
             )
-            existing_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(wps_settings)")
-            }
-            if "fba_col" not in existing_columns:
-                connection.execute("ALTER TABLE wps_settings ADD COLUMN fba_col INTEGER")
-            if "route_col" not in existing_columns:
-                connection.execute("ALTER TABLE wps_settings ADD COLUMN route_col INTEGER")
             connection.execute(
                 "INSERT OR IGNORE INTO system_settings(setting_key, setting_value) VALUES('max_query_count', ?)",
                 (str(SYSTEM_MAX_QUERY_COUNT),),
             )
+            # 旧网页版每个用户只有一份AirScript配置。首次升级时保留原记录，
+            # 同时迁移为该用户的“默认店铺”，桌面验证版仍可继续读取旧表。
+            legacy_table_exists = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='airscript_settings'
+                """
+            ).fetchone()
+            legacy_rows = (
+                connection.execute(
+                    """
+                    SELECT profile_id, share_url, webhook_url, api_token_ciphertext,
+                           sheet_name, updated_at
+                    FROM airscript_settings AS legacy
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM shops WHERE shops.profile_id=legacy.profile_id
+                    )
+                    """
+                ).fetchall()
+                if legacy_table_exists
+                else []
+            )
+            for row in legacy_rows:
+                connection.execute(
+                    """
+                    INSERT INTO shops(
+                        id, profile_id, name, share_url, webhook_url,
+                        api_token_ciphertext, sheet_name, created_at, updated_at
+                    ) VALUES (?, ?, '默认店铺', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        secrets.token_hex(16),
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                        row[5],
+                        row[5],
+                    ),
+                )
 
     def save_credentials(self, carrier: str, username: str, password: str) -> None:
         username = username.strip()
@@ -205,6 +251,18 @@ class ProjectDatabase:
         if row is None:
             return None
         return StoredCredentials(username=row[0], password=unprotect_secret(row[1]))
+
+    def credential_username(self, carrier: str) -> str | None:
+        """只读取非敏感账号名，用于状态页面，避免无必要地解密密码。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT username FROM carrier_credentials
+                WHERE profile_id=? AND carrier=?
+                """,
+                (self.profile_id, carrier.strip().lower()),
+            ).fetchone()
+        return None if row is None else str(row[0])
 
     def delete_credentials(self, carrier: str) -> None:
         with self._connect() as connection:
@@ -243,231 +301,118 @@ class ProjectDatabase:
                 (self.profile_id, carrier.strip().lower()),
             )
 
-    def save_anda_credentials(self, username: str, password: str) -> None:
-        self.save_credentials("anda", username, password)
-
-    def load_anda_credentials(self) -> StoredCredentials | None:
-        return self.load_credentials("anda")
-
-    def delete_anda_credentials(self) -> None:
-        self.delete_credentials("anda")
-
-    def save_wps_credentials(self, credentials: WpsCredentials) -> None:
-        app_id = credentials.app_id.strip()
-        share_url = credentials.share_url.strip()
-        if not app_id or not credentials.app_secret or not share_url:
-            raise ConfigurationError("WPS APPID、APPKEY和共享表链接不能为空")
-        secret_ciphertext = protect_secret(credentials.app_secret)
+    def list_shops(self) -> list[StoredShop]:
         with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT app_id FROM wps_settings WHERE profile_id=?", (self.profile_id,)
-            ).fetchone()
-            app_changed = existing is not None and existing[0] != app_id
-            connection.execute(
+            rows = connection.execute(
                 """
-                INSERT INTO wps_settings(
-                    profile_id, app_id, app_secret_ciphertext, share_url, redirect_uri,
-                    fba_col, route_col, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(profile_id) DO UPDATE SET
-                    app_id=excluded.app_id,
-                    app_secret_ciphertext=excluded.app_secret_ciphertext,
-                    share_url=excluded.share_url,
-                    redirect_uri=excluded.redirect_uri,
-                    fba_col=excluded.fba_col,
-                    route_col=excluded.route_col,
-                    updated_at=excluded.updated_at
+                SELECT id, name, share_url, webhook_url, api_token_ciphertext,
+                       sheet_name, created_at, updated_at
+                FROM shops WHERE profile_id=? ORDER BY created_at, name
                 """,
-                (
-                    self.profile_id,
-                    app_id,
-                    secret_ciphertext,
-                    share_url,
-                    credentials.redirect_uri or DEFAULT_REDIRECT_URI,
-                    credentials.fba_col,
-                    credentials.route_col,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            if app_changed:
-                connection.execute(
-                    """
-                    UPDATE wps_settings SET
-                        access_token_ciphertext=NULL, refresh_token_ciphertext=NULL, expires_at=NULL,
-                        file_id=NULL, worksheet_id=NULL, worksheet_name=NULL, max_row=NULL, max_col=NULL
-                    WHERE profile_id=?
-                    """,
-                    (self.profile_id,),
-                )
+                (self.profile_id,),
+            ).fetchall()
+        return [self._shop_from_row(row) for row in rows]
 
-    def load_wps_credentials(self) -> WpsCredentials | None:
+    def get_shop(self, shop_id: str) -> StoredShop | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT app_id, app_secret_ciphertext, share_url, redirect_uri, fba_col, route_col
-                FROM wps_settings WHERE profile_id=?
+                SELECT id, name, share_url, webhook_url, api_token_ciphertext,
+                       sheet_name, created_at, updated_at
+                FROM shops WHERE profile_id=? AND id=?
                 """,
-                (self.profile_id,),
+                (self.profile_id, shop_id),
             ).fetchone()
-        if row is None:
-            return None
-        return WpsCredentials(
-            app_id=row[0],
-            app_secret=unprotect_secret(row[1]),
-            share_url=row[2],
-                redirect_uri=row[3],
-                fba_col=int(row[4]) if row[4] is not None else None,
-                route_col=int(row[5]) if row[5] is not None else None,
+        return None if row is None else self._shop_from_row(row)
+
+    @staticmethod
+    def _shop_from_row(row) -> StoredShop:
+        return StoredShop(
+            id=str(row[0]),
+            name=str(row[1]),
+            config=AirScriptConfig(
+                share_url=str(row[2]),
+                webhook_url=str(row[3]),
+                api_token=unprotect_secret(str(row[4])),
+                sheet_name=str(row[5]),
+            ),
+            created_at=str(row[6]),
+            updated_at=str(row[7]),
         )
 
-    def save_wps_tokens(self, tokens: WpsTokens) -> None:
-        with self._connect() as connection:
-            updated = connection.execute(
-                """
-                UPDATE wps_settings SET
-                    access_token_ciphertext=?, refresh_token_ciphertext=?, expires_at=?, updated_at=?
-                WHERE profile_id=?
-                """,
-                (
-                    protect_secret(tokens.access_token),
-                    protect_secret(tokens.refresh_token),
-                    tokens.expires_at,
-                    datetime.now(timezone.utc).isoformat(),
-                    self.profile_id,
-                ),
-            )
-        if updated.rowcount != 1:
-            raise ConfigurationError("请先保存 WPS 应用配置")
-
-    def load_wps_tokens(self) -> WpsTokens | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT access_token_ciphertext, refresh_token_ciphertext, expires_at
-                FROM wps_settings WHERE profile_id=?
-                """,
-                (self.profile_id,),
-            ).fetchone()
-        if row is None or not row[0] or not row[1] or row[2] is None:
-            return None
-        return WpsTokens(
-            access_token=unprotect_secret(row[0]),
-            refresh_token=unprotect_secret(row[1]),
-            expires_at=float(row[2]),
-        )
-
-    def save_wps_binding(self, binding: WpsSheetBinding) -> None:
-        with self._connect() as connection:
-            updated = connection.execute(
-                """
-                UPDATE wps_settings SET
-                    file_id=?, worksheet_id=?, worksheet_name=?, max_row=?, max_col=?,
-                    fba_col=?, route_col=?, updated_at=?
-                WHERE profile_id=?
-                """,
-                (
-                    binding.file_id,
-                    binding.worksheet_id,
-                    binding.worksheet_name,
-                    binding.max_row,
-                    binding.max_col,
-                    binding.fba_col,
-                    binding.route_col,
-                    datetime.now(timezone.utc).isoformat(),
-                    self.profile_id,
-                ),
-            )
-        if updated.rowcount != 1:
-            raise ConfigurationError("请先保存 WPS 应用配置")
-
-    def load_wps_binding(self) -> WpsSheetBinding | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT file_id, worksheet_id, worksheet_name, max_row, max_col, fba_col, route_col
-                FROM wps_settings WHERE profile_id=?
-                """,
-                (self.profile_id,),
-            ).fetchone()
-        if row is None or row[0] is None or row[1] is None:
-            return None
-        return WpsSheetBinding(
-            file_id=row[0],
-            worksheet_id=int(row[1]),
-            worksheet_name=row[2],
-            max_row=int(row[3] or 0),
-                max_col=int(row[4] or 0),
-                fba_col=int(row[5]) if row[5] is not None else None,
-                route_col=int(row[6]) if row[6] is not None else None,
-        )
-
-    def clear_wps_authorization(self) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE wps_settings SET
-                    access_token_ciphertext=NULL, refresh_token_ciphertext=NULL, expires_at=NULL,
-                    file_id=NULL, worksheet_id=NULL, worksheet_name=NULL, max_row=NULL, max_col=NULL
-                WHERE profile_id=?
-                """,
-                (self.profile_id,),
-            )
-
-    def save_airscript_config(self, config: AirScriptConfig) -> None:
+    def save_shop(
+        self, name: str, config: AirScriptConfig, shop_id: str | None = None
+    ) -> StoredShop:
+        name = name.strip()
+        if not name or len(name) > 60:
+            raise ConfigurationError("店铺名称不能为空且不能超过60位")
         share_url = config.share_url.strip()
         webhook_url = config.webhook_url.strip()
         sheet_name = config.sheet_name.strip()
         if not share_url or not webhook_url or not config.api_token or not sheet_name:
-            raise ConfigurationError("共享表链接、AirScript webhook和脚本令牌不能为空")
+            raise ConfigurationError("店铺名称、共享表链接、Webhook和脚本令牌不能为空")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        encrypted_token = protect_secret(config.api_token)
+        try:
+            with self._connect() as connection:
+                if shop_id:
+                    updated = connection.execute(
+                        """
+                        UPDATE shops SET name=?, share_url=?, webhook_url=?,
+                            api_token_ciphertext=?, sheet_name=?, updated_at=?
+                        WHERE id=? AND profile_id=?
+                        """,
+                        (
+                            name,
+                            share_url,
+                            webhook_url,
+                            encrypted_token,
+                            sheet_name,
+                            timestamp,
+                            shop_id,
+                            self.profile_id,
+                        ),
+                    )
+                    if updated.rowcount != 1:
+                        raise ConfigurationError("店铺不存在或不属于当前用户")
+                else:
+                    shop_id = secrets.token_hex(16)
+                    connection.execute(
+                        """
+                        INSERT INTO shops(
+                            id, profile_id, name, share_url, webhook_url,
+                            api_token_ciphertext, sheet_name, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            shop_id,
+                            self.profile_id,
+                            name,
+                            share_url,
+                            webhook_url,
+                            encrypted_token,
+                            sheet_name,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+        except sqlite3.IntegrityError as exc:
+            raise ConfigurationError("当前账号已经存在同名店铺") from exc
+        shop = self.get_shop(shop_id)
+        assert shop is not None
+        return shop
+
+    def delete_shop(self, shop_id: str) -> None:
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO airscript_settings(
-                    profile_id, share_url, webhook_url, api_token_ciphertext,
-                    sheet_name, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(profile_id) DO UPDATE SET
-                    share_url=excluded.share_url,
-                    webhook_url=excluded.webhook_url,
-                    api_token_ciphertext=excluded.api_token_ciphertext,
-                    sheet_name=excluded.sheet_name,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    self.profile_id,
-                    share_url,
-                    webhook_url,
-                    protect_secret(config.api_token),
-                    sheet_name,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
+            deleted = connection.execute(
+                "DELETE FROM shops WHERE id=? AND profile_id=?",
+                (shop_id, self.profile_id),
             )
+        if deleted.rowcount != 1:
+            raise ConfigurationError("店铺不存在或不属于当前用户")
 
-    def load_airscript_config(self) -> AirScriptConfig | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT share_url, webhook_url, api_token_ciphertext, sheet_name
-                FROM airscript_settings WHERE profile_id=?
-                """,
-                (self.profile_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        return AirScriptConfig(
-            share_url=row[0],
-            webhook_url=row[1],
-            api_token=unprotect_secret(row[2]),
-            sheet_name=row[3],
-        )
-
-    def delete_airscript_config(self) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "DELETE FROM airscript_settings WHERE profile_id=?", (self.profile_id,)
-            )
-
-    def max_query_count(self) -> int:
+    def query_batch_size(self) -> int:
+        """单个内部查询批次上限；不限制用户一次任务的总数量。"""
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT setting_value FROM system_settings WHERE setting_key='max_query_count'"

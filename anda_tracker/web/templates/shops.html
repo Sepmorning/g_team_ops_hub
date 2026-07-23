@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}我的店铺 · FBA运营工作台{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>我的店铺</h1><p>一个店铺维护一份共享表；每个账号可以独立管理多个店铺。</p></div><button class="btn primary" onclick="openShop()">添加店铺</button></header>
+<div id="shopStatus" class="status"></div>
+{% if shops %}<section class="grid cols-2">
+{% for shop in shops %}<article class="card"><div class="section-head"><div><h2>{{ shop.name }}</h2><span class="muted">US-FBA</span></div><span class="pill">已保存</span></div><p style="word-break:break-all">{{ shop.config.share_url }}</p><div class="actions"><button class="btn primary" onclick="validateShop('{{ shop.id }}',this)">测试连接</button><button class="btn" data-id="{{ shop.id }}" data-name="{{ shop.name|e }}" data-share="{{ shop.config.share_url|e }}" data-webhook="{{ shop.config.webhook_url|e }}" onclick="editShop(this)">编辑</button><button class="btn danger" onclick="deleteShop('{{ shop.id }}')">删除</button></div></article>{% endfor %}
+</section>{% else %}<section class="card" style="text-align:center;padding:60px 24px"><h2>还没有店铺</h2><p>添加店铺并连接AirScript后，物流查询可以选择对应共享表。</p><button class="btn primary" onclick="openShop()">添加第一个店铺</button></section>{% endif %}
+<dialog id="shopDialog"><div class="dialog-body"><div class="section-head"><h2 id="dialogTitle">添加店铺</h2><button class="btn small" onclick="shopDialog.close()">关闭</button></div><input id="shopId" type="hidden"><div class="field"><label>店铺名称</label><input id="shopName" maxlength="60" placeholder="例如：美国一店"></div><div class="field" style="margin-top:12px"><label>共享表链接</label><input id="shopShare" placeholder="https://www.kdocs.cn/l/…"></div><div class="field" style="margin-top:12px"><label>脚本Webhook</label><input id="shopWebhook" placeholder="https://www.kdocs.cn/api/v3/ide/…/sync_task"></div><div class="field" style="margin-top:12px"><label>脚本令牌</label><input id="shopToken" type="password" autocomplete="new-password" placeholder="编辑时留空表示继续使用已保存令牌"></div><button class="btn primary" id="saveShopButton" style="margin-top:18px;width:100%" onclick="saveShop(this)">保存并测试连接</button></div></dialog>
+{% endblock %}
+{% block scripts %}
+<script>
+const shopStatus=document.querySelector('#shopStatus');
+function openShop(){shopId.value='';shopName.value='';shopShare.value='';shopWebhook.value='';shopToken.value='';dialogTitle.textContent='添加店铺';shopDialog.showModal()}
+function editShop(btn){shopId.value=btn.dataset.id;shopName.value=btn.dataset.name;shopShare.value=btn.dataset.share;shopWebhook.value=btn.dataset.webhook;shopToken.value='';dialogTitle.textContent='编辑店铺';shopDialog.showModal()}
+async function saveShop(btn){FBA.buttonBusy(btn,true,'连接并保存…');try{const d=await FBA.api('/api/shops',{method:'POST',body:{id:shopId.value,name:shopName.value,share_url:shopShare.value,webhook_url:shopWebhook.value,api_token:shopToken.value}});shopDialog.close();FBA.showStatus(shopStatus,d.message,'ok');setTimeout(()=>location.reload(),600)}catch(e){FBA.showStatus(shopStatus,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
+async function validateShop(id,btn){FBA.buttonBusy(btn,true,'测试中…');try{const d=await FBA.api(`/api/shops/${id}/validation`,{method:'POST'});FBA.showStatus(shopStatus,d.message,'ok')}catch(e){FBA.showStatus(shopStatus,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
+async function deleteShop(id){if(!confirm('确定删除这个店铺配置？不会删除WPS中的表格内容。'))return;try{const d=await FBA.api(`/api/shops/${id}`,{method:'DELETE'});FBA.showStatus(shopStatus,d.message,'ok');setTimeout(()=>location.reload(),400)}catch(e){FBA.showStatus(shopStatus,e.message,'error')}}
+</script>
+{% endblock %}

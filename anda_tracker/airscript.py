@@ -18,11 +18,21 @@ from .errors import (
     ServerError,
 )
 from .models import QueryStatus, TrackingResult
-from .wps import parse_share_file_id
 
 
 TARGET_SHEET_NAME = "US-FBA"
-MAX_AIRSCRIPT_ITEMS = 50
+AIRSCRIPT_WRITE_BATCH_SIZE = 50
+
+
+def parse_share_file_id(share_url: str) -> str:
+    """验证金山文档分享链接，并返回不含敏感信息的文件标识。"""
+    value = share_url.strip()
+    match = re.fullmatch(
+        r"https://www\.kdocs\.cn/l/([A-Za-z0-9_-]+)(?:[/?#].*)?", value
+    )
+    if not match:
+        raise ConfigurationError("共享表链接格式不正确，应为 https://www.kdocs.cn/l/…")
+    return match.group(1)
 
 
 @dataclass(frozen=True)
@@ -38,6 +48,7 @@ class AirScriptBinding:
     sheet_name: str
     fba_column: str
     route_column: str
+    completion_column: str = ""
 
 
 @dataclass
@@ -107,14 +118,22 @@ class AirScriptClient:
         self.timeout = timeout
         self.retries = max(0, retries)
 
-    def _execute(self, action: str, items: list[dict[str, str]]) -> dict[str, Any]:
+    def _execute(
+        self,
+        action: str,
+        items: list[dict[str, str]],
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        argv = {
+            "action": action,
+            "sheet_name": self.config.sheet_name,
+            "items": items,
+        }
+        if arguments:
+            argv.update(arguments)
         payload = {
             "Context": {
-                "argv": {
-                    "action": action,
-                    "sheet_name": self.config.sheet_name,
-                    "items": items,
-                }
+                "argv": argv
             }
         }
         headers = {
@@ -157,7 +176,7 @@ class AirScriptClient:
         assert response is not None
         try:
             body = response.json()
-        except (ValueError, json.JSONDecodeError) as exc:
+        except ValueError as exc:
             raise ResponseError("AirScript 返回的内容不是有效 JSON") from exc
         if not isinstance(body, dict):
             raise ResponseError("AirScript 返回的数据结构无效")
@@ -191,10 +210,47 @@ class AirScriptClient:
             raise ResponseError("AirScript 验证结果缺少自动识别的列信息")
         fba_column = str(columns.get("fba") or "").strip()
         route_column = str(columns.get("route") or "").strip()
+        completion_column = str(columns.get("completion") or "").strip()
         sheet_name = str(result.get("sheetName") or "").strip()
-        if not sheet_name or not fba_column or not route_column:
-            raise ResponseError("AirScript 未能识别 US-FBA 的 FBA列或路由列")
-        return AirScriptBinding(sheet_name, fba_column, route_column)
+        if not sheet_name or not fba_column or not route_column or not completion_column:
+            raise ResponseError(
+                "AirScript 未能识别US-FBA的FBA列、是否完成列或路由列"
+            )
+        return AirScriptBinding(
+            sheet_name, fba_column, route_column, completion_column
+        )
+
+    def list_pending_fbas(self, page_size: int = 500) -> list[str]:
+        """分页读取“是否完成”不是“是”的FBA，总量不设业务上限。"""
+        page_size = max(1, min(500, page_size))
+        offset = 0
+        values: list[str] = []
+        seen: set[str] = set()
+        for _page in range(100):
+            result = self._execute(
+                "list_pending",
+                [],
+                {"offset": offset, "limit": page_size},
+            )
+            page = result.get("fbas")
+            if not isinstance(page, list):
+                raise ResponseError("AirScript待读取结果缺少FBA列表")
+            for item in page:
+                fba = str(item).strip().upper()
+                if re.fullmatch(r"FBA[A-Z0-9-]{5,}", fba) and fba not in seen:
+                    seen.add(fba)
+                    values.append(fba)
+            if result.get("hasMore") is not True:
+                return values
+            next_offset = result.get("nextOffset")
+            try:
+                next_offset = int(next_offset)
+            except (TypeError, ValueError) as exc:
+                raise ResponseError("AirScript分页结果缺少有效偏移量") from exc
+            if next_offset <= offset:
+                raise ResponseError("AirScript分页偏移量没有前进，已停止读取")
+            offset = next_offset
+        raise ResponseError("AirScript待读取分页超过安全上限，请检查表格使用区域")
 
     def sync_tracking_results(
         self, results: list[TrackingResult]
@@ -209,14 +265,24 @@ class AirScriptClient:
             items.append({"fba": result.fba, "route": route})
         if not items:
             return summary
-        if len(items) > MAX_AIRSCRIPT_ITEMS:
-            raise ConfigurationError(
-                f"单次 AirScript 回填不能超过 {MAX_AIRSCRIPT_ITEMS} 个 FBA"
-            )
-        result = self._execute("sync", items)
-        summary.updated = _string_list(result.get("updated"))
-        summary.unchanged = _string_list(result.get("unchanged"))
-        summary.not_in_sheet = _string_list(result.get("notInSheet"))
-        summary.duplicate_rows = _string_list(result.get("duplicateRows"))
-        summary.failures = _string_list(result.get("failures"))
+        # 用户总量不限。每次 webhook 调用维持50条安全上限，自动分批并汇总。
+        for offset in range(0, len(items), AIRSCRIPT_WRITE_BATCH_SIZE):
+            batch = items[offset : offset + AIRSCRIPT_WRITE_BATCH_SIZE]
+            try:
+                # 继续使用既有sync动作，已安装的正式脚本无需因客户端分批升级而替换。
+                result = self._execute("sync", batch)
+            except (NetworkError, AuthenticationError, RateLimitError, ServerError, ResponseError) as exc:
+                batch_number = offset // AIRSCRIPT_WRITE_BATCH_SIZE + 1
+                total_batches = (
+                    len(items) + AIRSCRIPT_WRITE_BATCH_SIZE - 1
+                ) // AIRSCRIPT_WRITE_BATCH_SIZE
+                raise type(exc)(
+                    f"AirScript第 {batch_number}/{total_batches} 批回填失败；"
+                    f"此前已处理 {offset} 条。可重新查询安全补写：{exc.user_message}"
+                ) from exc
+            summary.updated.extend(_string_list(result.get("updated")))
+            summary.unchanged.extend(_string_list(result.get("unchanged")))
+            summary.not_in_sheet.extend(_string_list(result.get("notInSheet")))
+            summary.duplicate_rows.extend(_string_list(result.get("duplicateRows")))
+            summary.failures.extend(_string_list(result.get("failures")))
         return summary

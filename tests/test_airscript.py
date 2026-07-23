@@ -6,7 +6,7 @@ import requests
 from anda_tracker.airscript import (
     AirScriptClient,
     AirScriptConfig,
-    MAX_AIRSCRIPT_ITEMS,
+    AIRSCRIPT_WRITE_BATCH_SIZE,
     validate_webhook_url,
 )
 from anda_tracker.errors import AuthenticationError, ConfigurationError, NetworkError, ResponseError
@@ -78,7 +78,7 @@ def test_validate_reads_auto_detected_columns_and_never_places_token_in_body():
                     {
                         "success": True,
                         "sheetName": "US-FBA",
-                        "columns": {"fba": "E", "route": "Q"},
+                        "columns": {"fba": "E", "route": "Q", "completion": "F"},
                     }
                 )
             )
@@ -88,6 +88,7 @@ def test_validate_reads_auto_detected_columns_and_never_places_token_in_body():
     binding = client.validate()
     assert binding.fba_column == "E"
     assert binding.route_column == "Q"
+    assert binding.completion_column == "F"
     _, kwargs = session.calls[0]
     assert kwargs["headers"]["AirScript-Token"] == "placeholder-airscript-token"
     assert "placeholder-airscript-token" not in json.dumps(kwargs["json"])
@@ -99,11 +100,43 @@ def test_validate_accepts_json_string_result():
         {
             "success": True,
             "sheetName": "US-FBA",
-            "columns": {"fba": "A", "route": "I"},
+            "columns": {"fba": "A", "route": "I", "completion": "B"},
         }
     )
     client = AirScriptClient(config(), session=FakeSession([FakeResponse(body=finished(result))]))
     assert client.validate().route_column == "I"
+
+
+def test_pending_fbas_are_read_in_pages_and_deduplicated():
+    session = FakeSession(
+        [
+            FakeResponse(
+                body=finished(
+                    {
+                        "success": True,
+                        "fbas": ["FBA11111", "FBA22222"],
+                        "hasMore": True,
+                        "nextOffset": 2,
+                    }
+                )
+            ),
+            FakeResponse(
+                body=finished(
+                    {
+                        "success": True,
+                        "fbas": ["FBA22222", "FBA33333"],
+                        "hasMore": False,
+                        "nextOffset": 4,
+                    }
+                )
+            ),
+        ]
+    )
+    values = AirScriptClient(config(), session=session).list_pending_fbas(page_size=2)
+    assert values == ["FBA11111", "FBA22222", "FBA33333"]
+    argv = [call[1]["json"]["Context"]["argv"] for call in session.calls]
+    assert [item["action"] for item in argv] == ["list_pending", "list_pending"]
+    assert [item["offset"] for item in argv] == [0, 2]
 
 
 def test_sync_sends_only_successful_results_and_maps_summary():
@@ -138,11 +171,42 @@ def test_sync_sends_only_successful_results_and_maps_summary():
     assert items == [{"fba": "FBA11111", "route": "2026-07-20 10:00 已到港"}]
 
 
-def test_sync_enforces_system_safety_limit():
-    client = AirScriptClient(config(), session=FakeSession([]))
-    results = [tracking(f"FBA{index:05d}", "事件") for index in range(MAX_AIRSCRIPT_ITEMS + 1)]
-    with pytest.raises(ConfigurationError, match="50"):
-        client.sync_tracking_results(results)
+def test_sync_total_is_unlimited_and_webhook_calls_are_split_to_fifty():
+    response_one = {
+        "success": True,
+        "updated": [f"FBA{index:05d}" for index in range(50)],
+        "unchanged": [],
+        "notInSheet": [],
+        "duplicateRows": [],
+        "failures": [],
+    }
+    response_two = {
+        "success": True,
+        "updated": ["FBA00050"],
+        "unchanged": [],
+        "notInSheet": [],
+        "duplicateRows": [],
+        "failures": [],
+    }
+    session = FakeSession(
+        [FakeResponse(body=finished(response_one)), FakeResponse(body=finished(response_two))]
+    )
+    client = AirScriptClient(config(), session=session)
+    results = [
+        tracking(f"FBA{index:05d}", "事件")
+        for index in range(AIRSCRIPT_WRITE_BATCH_SIZE + 1)
+    ]
+    summary = client.sync_tracking_results(results)
+    assert len(session.calls) == 2
+    assert [
+        len(call[1]["json"]["Context"]["argv"]["items"])
+        for call in session.calls
+    ] == [50, 1]
+    assert all(
+        call[1]["json"]["Context"]["argv"]["action"] == "sync"
+        for call in session.calls
+    )
+    assert len(summary.updated) == 51
 
 
 def test_authentication_and_script_errors_are_classified():

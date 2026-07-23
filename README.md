@@ -1,126 +1,97 @@
-# FBA物流查询与WPS回填
+# FBA运营工作台（网页版）
 
-Windows桌面程序，支持安达、超鸿和易通物流查询，自动识别货代并提示多货代冲突；查询成功后可将发生变化的最新路由写入WPS共享表的 `US-FBA` 子表。
+这是当前持续开发的FastAPI网页版项目。桌面验证版已经分离到同级目录 `D:\CodexProject\FBA_Tracker_Desktop`，两套程序拥有独立源码、依赖、数据库和EXE，互不读写对方的数据。
 
-## 克隆后直接运行
+## 已实现功能
 
-仓库根目录包含已打包的Windows程序：
+- 管理员初始化、普通用户创建、停用和密码重置
+- 用户货代账号、登录会话和店铺配置严格按用户隔离
+- 安达、超鸿、易通查询与货代冲突检测
+- 多店铺WPS AirScript配置
+- 手动FBA查询并可选回填
+- 从 `US-FBA` 自动读取未完成FBA并分批查询、回填
+- 本地滚动日志，不记录密码、令牌或请求正文
+
+## 运行
+
+直接运行：
 
 ```text
-AndaFbaTracker.exe
+FbaTrackerWeb.exe
 ```
 
-双击EXE或 `启动项目.bat` 即可运行，不需要另行安装Python依赖。`启动项目.bat` 只包含ASCII字符，可兼容代码页936。
+浏览器访问 `http://127.0.0.1:8765`。关闭EXE窗口会停止本机服务。
 
-> EXE未进行商业代码签名，Windows首次运行时可能显示安全提示。请只从本项目仓库下载。
-
-## 源码开发
-
-建议安装64位Python 3.12。首次建立项目内环境：
+源码运行：
 
 ```powershell
 .\setup_project.ps1
+.\start_web.ps1
 ```
 
-依赖会安装到项目自己的 `.venv`，不会使用全局Python环境。源码启动：
-
-```powershell
-.\.venv\Scripts\python.exe main.py
-```
-
-依赖清单：
-
-- `requirements.txt`：运行依赖；
-- `requirements-dev.txt`：运行依赖、测试工具和EXE构建工具。
-
-## 本机数据与安全
-
-程序在根目录的 `data/app.db` 保存本机设置。安达、易通密码、易通会话令牌和AirScript脚本令牌均使用Windows DPAPI加密，不会明文写入代码、配置或日志。迁移前保存的WPS APPKEY和OAuth令牌也继续保持加密。
-
-以下内容被Git排除，不会上传GitHub：
-
-- `data/`及SQLite数据库；
-- `.venv/`；
-- 日志、缓存、临时打包目录；
-- `.env`、密钥和证书文件。
-
-换Windows用户或电脑后，DPAPI密文通常无法解密，需要重新输入账号和AirScript脚本令牌。
-
-## 易通首次使用
-
-1. 输入自己的易通账号和密码。
-2. 等待验证码图片出现并人工输入。
-3. 点击“安全保存并登录”。
-4. 有效会话会加密保存在本机；会话失效后才需要重新验证。
-
-程序不会识别、破解或绕过图形验证码。
-
-## WPS共享表与AirScript
-
-当前只处理名称为 `US-FBA` 的子表，不写入其他国家子表。
-
-项目使用WPS文档共享脚本完成回填。正式脚本位于：
-
-```text
-airscripts/FBA物流自动回填.js
-```
-
-首次配置：
-
-1. 在共享表的“效率 → 高级开发 → AirScript脚本编辑器”中新建AirScript 2.0文档共享脚本。
-2. 将正式脚本完整粘贴进去，保存并手动运行一次；默认运行只做验证，不写数据。
-3. 从文档共享脚本菜单复制webhook。
-4. 在程序中填写共享表链接、webhook和脚本令牌。
-5. 点击“安全保存并测试AirScript”。
-
-程序不再要求填写APPID、APPKEY或列字母。脚本扫描第一行前100列并自动识别：
-
-- FBA列：`FBA单号`、`FBA号`、`FBA编号`或`FBA`；
-- 路由列：`货代最新路由信息`、`最新路由信息`或`路由`。
-
-目标表头不存在或出现多列时，脚本停止写入，不会猜测目标列。
-
-同步规则：
-
-- 每次同步重新识别 `US-FBA` 和目标表头；
-- 只处理查询成功且存在最新路由的FBA；
-- 只修改自动识别出的路由信息单元格，不修改其他列和格式；
-- 新旧路由完全相同时不重复写入；
-- 表内不存在的FBA跳过；
-- 同一FBA出现多行时不更新该FBA并提示重复；
-- 单次最多回填50条，脚本最多扫描到第20000行，避免异常使用区域造成长时间运行。
+项目依赖全部安装在本目录的 `.venv` 中。本机业务数据位于 `data`，不会提交到版本库。
 
 ## 测试
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m compileall -q anda_tracker main.py tests
+.\.venv\Scripts\python.exe -m compileall -q anda_tracker web_main.py tests
 ```
 
-## 重新生成EXE
+重新生成网页版EXE：
 
 ```powershell
-.\build_exe.ps1
+.\build_web_exe.ps1
 ```
 
-生成结果为根目录的 `AndaFbaTracker.exe`。打包临时目录会自动清理。
-
-## 项目结构
+## 主要目录
 
 ```text
 anda_fba_tracker/
-├─ anda_tracker/         程序源码
-├─ airscripts/           需要安装到WPS文档共享脚本的正式脚本
-├─ tests/                自动化测试
-├─ data/                 本机加密数据库（不上传Git）
-├─ AndaFbaTracker.exe    可直接运行的Windows程序
-├─ 启动项目.bat           兼容代码页936的启动入口
-├─ main.py               源码入口
-├─ requirements.txt      运行依赖
-├─ requirements-dev.txt  测试和构建依赖
-├─ setup_project.ps1     建立项目内环境
-├─ build_exe.ps1         生成EXE
-└─ README.md
+├─ anda_tracker/
+│  ├─ web/                 FastAPI路由、页面和静态资源
+│  ├─ airscript.py         WPS AirScript客户端
+│  ├─ auth.py              系统账号
+│  ├─ storage.py           用户隔离的本地数据
+│  ├─ client.py            安达
+│  ├─ chaohong.py          超鸿
+│  └─ yitong.py            易通
+├─ airscripts/             安装到WPS的文档共享脚本
+├─ tests/                  网页版和查询核心测试
+├─ data/
+│  ├─ app.db               网页版独立数据库
+│  └─ logs/web.log         运行日志
+├─ web_main.py             网页版入口
+├─ start_web.ps1           源码启动脚本
+├─ build_web_exe.ps1       EXE构建脚本
+└─ FbaTrackerWeb.exe
 ```
 
-后续前后端和多页面开发约束记录在 `后续开发约束.md`。
+## 数据和安全
+
+- 登录密码使用不可逆PBKDF2哈希。
+- 货代密码、登录令牌和AirScript令牌使用当前Windows用户的DPAPI加密。
+- 管理员可以管理系统账号，但不能查看其他用户的业务密码或令牌明文。
+- 每个店铺、货代配置和会话查询都必须带当前登录用户的 `profile_id`。
+- `data` 目录只应保存在当前电脑；不要提交或发送给他人。
+
+## AirScript
+
+正式脚本为 `airscripts\FBA物流自动回填.js`。升级和必需表头见 `AirScript升级说明.md`。
+
+任务总量不限制为50条。程序只在内部按最多50条分批查询和回填，以降低货代接口和WPS服务压力。
+
+## API命名
+
+- `/api/tracking/query`：手动物流查询
+- `/api/carriers/status`：货代状态
+- `/api/carriers/anda`：安达账号
+- `/api/carriers/yitong/captcha-challenges`：易通验证码
+- `/api/carriers/yitong/session`：易通登录会话
+- `/api/shops`：店铺
+- `/api/shops/{shop_id}/validation`：验证店铺AirScript
+- `/api/shops/{shop_id}/tracking-sync`：一键查询并回填
+
+旧的 `/api/connections/*`、`/api/query` 和单配置AirScript接口已经移除。
+
+本轮发现、修复和保留风险详见 `项目代码审计报告.md`。

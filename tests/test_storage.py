@@ -1,14 +1,17 @@
 import sqlite3
 
 from anda_tracker.airscript import AirScriptConfig
-from anda_tracker.storage import ProjectDatabase, SYSTEM_MAX_QUERY_COUNT
-from anda_tracker.wps import WpsCredentials, WpsSheetBinding, WpsTokens
+from anda_tracker.storage import (
+    ProjectDatabase,
+    SYSTEM_MAX_QUERY_COUNT,
+    protect_secret,
+)
 
 
 def test_password_is_dpapi_encrypted_inside_project_database(tmp_path):
     database_path = tmp_path / "data" / "app.db"
     database = ProjectDatabase(database_path)
-    database.save_anda_credentials("placeholder-user", "placeholder-secret")
+    database.save_credentials("anda", "placeholder-user", "placeholder-secret")
 
     with sqlite3.connect(database_path) as connection:
         row = connection.execute(
@@ -16,19 +19,19 @@ def test_password_is_dpapi_encrypted_inside_project_database(tmp_path):
         ).fetchone()
     assert row[0] == "placeholder-user"
     assert "placeholder-secret" not in row[1]
-    loaded = database.load_anda_credentials()
+    loaded = database.load_credentials("anda")
     assert loaded is not None
     assert loaded.password == "placeholder-secret"
 
 
 def test_system_query_limit_defaults_to_and_cannot_exceed_50(tmp_path):
     database = ProjectDatabase(tmp_path / "app.db")
-    assert database.max_query_count() == SYSTEM_MAX_QUERY_COUNT == 50
+    assert database.query_batch_size() == SYSTEM_MAX_QUERY_COUNT == 50
     with sqlite3.connect(database.path) as connection:
         connection.execute(
             "UPDATE system_settings SET setting_value='500' WHERE setting_key='max_query_count'"
         )
-    assert database.max_query_count() == 50
+    assert database.query_batch_size() == 50
 
 
 def test_yitong_password_and_session_token_are_encrypted(tmp_path):
@@ -48,65 +51,71 @@ def test_yitong_password_and_session_token_are_encrypted(tmp_path):
     assert database.load_session_token("yitong") == "placeholder-token"
 
 
-def test_wps_appkey_and_oauth_tokens_are_encrypted(tmp_path):
-    database = ProjectDatabase(tmp_path / "app.db")
-    credentials = WpsCredentials(
-        "placeholder-appid",
-        "placeholder-appkey",
-        "https://www.kdocs.cn/l/file123",
-        fba_col=4,
-        route_col=24,
-    )
-    database.save_wps_credentials(credentials)
-    database.save_wps_tokens(WpsTokens("access-secret", "refresh-secret", 1234567890))
-    database.save_wps_binding(WpsSheetBinding("file123", 9, "US-FBA", 100, 24, 4, 24))
-    with sqlite3.connect(database.path) as connection:
-        row = connection.execute(
-            """
-            SELECT app_secret_ciphertext, access_token_ciphertext, refresh_token_ciphertext
-            FROM wps_settings
-            """
-        ).fetchone()
-    assert "placeholder-appkey" not in row[0]
-    assert "access-secret" not in row[1]
-    assert "refresh-secret" not in row[2]
-    assert database.load_wps_credentials().app_secret == "placeholder-appkey"
-    assert database.load_wps_credentials().fba_col == 4
-    assert database.load_wps_credentials().route_col == 24
-    assert database.load_wps_tokens().refresh_token == "refresh-secret"
-    assert database.load_wps_binding().worksheet_name == "US-FBA"
-    assert database.load_wps_binding().fba_col == 4
-    assert database.load_wps_binding().route_col == 24
-
-
-def test_airscript_token_is_encrypted_and_config_can_be_loaded(tmp_path):
-    database = ProjectDatabase(tmp_path / "app.db")
-    config = AirScriptConfig(
-        share_url="https://www.kdocs.cn/l/share123",
-        webhook_url=(
-            "https://www.kdocs.cn/api/v3/ide/file/file-id/"
-            "script/script-id/sync_task"
-        ),
-        api_token="placeholder-airscript-secret",
-    )
-    database.save_airscript_config(config)
-    with sqlite3.connect(database.path) as connection:
-        row = connection.execute(
-            "SELECT api_token_ciphertext FROM airscript_settings"
-        ).fetchone()
-    assert "placeholder-airscript-secret" not in row[0]
-    loaded = database.load_airscript_config()
-    assert loaded == config
-
-
-def test_deleting_airscript_config_does_not_touch_legacy_wps_settings(tmp_path):
-    database = ProjectDatabase(tmp_path / "app.db")
-    database.save_airscript_config(
+def test_multiple_shops_are_encrypted_and_isolated_by_profile(tmp_path):
+    path = tmp_path / "app.db"
+    first = ProjectDatabase(path, profile_id="user-one")
+    second = ProjectDatabase(path, profile_id="user-two")
+    first_shop = first.save_shop(
+        "美国一店",
         AirScriptConfig(
-            "https://www.kdocs.cn/l/share123",
-            "https://www.kdocs.cn/api/v3/ide/file/file/script/script/sync_task",
-            "placeholder-token",
-        )
+            "https://www.kdocs.cn/l/share-one",
+            "https://www.kdocs.cn/api/v3/ide/file/f1/script/s1/sync_task",
+            "token-one",
+        ),
     )
-    database.delete_airscript_config()
-    assert database.load_airscript_config() is None
+    first.save_shop(
+        "美国二店",
+        AirScriptConfig(
+            "https://www.kdocs.cn/l/share-two",
+            "https://www.kdocs.cn/api/v3/ide/file/f2/script/s2/sync_task",
+            "token-two",
+        ),
+    )
+    second.save_shop(
+        "其他店铺",
+        AirScriptConfig(
+            "https://www.kdocs.cn/l/share-three",
+            "https://www.kdocs.cn/api/v3/ide/file/f3/script/s3/sync_task",
+            "token-three",
+        ),
+    )
+    assert [shop.name for shop in first.list_shops()] == ["美国一店", "美国二店"]
+    assert [shop.name for shop in second.list_shops()] == ["其他店铺"]
+    assert second.get_shop(first_shop.id) is None
+    with sqlite3.connect(path) as connection:
+        ciphertext = connection.execute(
+            "SELECT api_token_ciphertext FROM shops WHERE id=?", (first_shop.id,)
+        ).fetchone()[0]
+    assert "token-one" not in ciphertext
+
+
+def test_legacy_airscript_config_migrates_to_default_shop(tmp_path):
+    path = tmp_path / "app.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE airscript_settings (
+                profile_id TEXT PRIMARY KEY,
+                share_url TEXT NOT NULL,
+                webhook_url TEXT NOT NULL,
+                api_token_ciphertext TEXT NOT NULL,
+                sheet_name TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO airscript_settings VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "owner",
+                "https://www.kdocs.cn/l/legacy",
+                "https://www.kdocs.cn/api/v3/ide/file/f/script/s/sync_task",
+                protect_secret("legacy-token"),
+                "US-FBA",
+                "2026-07-23T00:00:00+00:00",
+            ),
+        )
+    shops = ProjectDatabase(path, profile_id="owner").list_shops()
+    assert len(shops) == 1
+    assert shops[0].name == "默认店铺"
+    assert shops[0].config.api_token == "legacy-token"

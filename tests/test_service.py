@@ -1,4 +1,4 @@
-from anda_tracker.errors import NetworkError
+from anda_tracker.errors import AuthenticationError, NetworkError
 from anda_tracker.models import QueryStatus
 from anda_tracker.service import AndaQueryService
 
@@ -44,3 +44,22 @@ def test_failed_batch_does_not_block_next_batch():
     assert results[1].status == QueryStatus.FAILED
     assert results[2].status == QueryStatus.SUCCESS
 
+
+def test_expired_anda_session_relogs_once_and_retries_batch():
+    client = StubClient(
+        [
+            AuthenticationError("会话失效"),
+            [{"fbaCode": "FBA111", "latestTraceName": "已到港"}],
+        ]
+    )
+    relogins = []
+    service = AndaQueryService(
+        client,
+        batch_size=50,
+        request_interval=0,
+        reauthenticate=lambda: relogins.append("login"),
+    )
+    results = service.query_many(["FBA111"])
+    assert relogins == ["login"]
+    assert client.batches == [["FBA111"], ["FBA111"]]
+    assert results[0].status == QueryStatus.SUCCESS

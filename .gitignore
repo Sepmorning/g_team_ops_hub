@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 .build-exe/
+.build-web-exe/
 dist/
 build/
 *.spec
@@ -13,5 +14,6 @@ packages/
 .env.*
 *.key
 *.pem
+data/logs/
 .idea/
 .vscode/

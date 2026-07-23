@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}工作台 · FBA运营工作台{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>工作台概览</h1><p>核心物流查询已经接入网页版，后续运营模块将在这里逐步加入。</p></div><span class="badge">本机开发环境</span></header>
+<section class="grid cols-3">
+  <article class="card accent-card"><div class="metric-label">你好</div><div class="metric">{{ account.display_name }}</div><p>从物流查询开始今天的工作。</p></article>
+  <article class="card"><div class="metric-label">已接入货代</div><div class="metric">3</div><p>安达、超鸿、易通使用同一套桌面版查询核心。</p></article>
+  <article class="card"><div class="metric-label">单任务总量</div><div class="metric">不限</div><p>系统内部每50条自动拆分，完整返回全部结果。</p></article>
+</section>
+<section class="grid cols-2" style="margin-top:18px">
+  <article class="card"><h3>物流查询</h3><p>粘贴FBA编号，自动判断货代、处理冲突，并按需同步到US-FBA。</p><a class="btn primary" href="/tracking">开始查询</a></article>
+  <article class="card"><h3>连接与店铺</h3><p>分别维护自己的货代账号，以及一个或多个店铺共享表。</p><div class="actions"><a class="btn" href="/carriers">货代连接</a><a class="btn" href="/shops">我的店铺</a></div></article>
+</section>
+{% endblock %}

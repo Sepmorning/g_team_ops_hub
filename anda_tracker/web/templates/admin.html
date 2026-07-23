@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}账号管理 · FBA运营工作台{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>账号管理</h1><p>管理员管理登录权限，但不能查看其他用户的货代密码、令牌和共享表。</p></div><button class="btn primary" onclick="userDialog.showModal()">新建账号</button></header>
+<div id="adminStatus" class="status"></div>
+<section class="card"><div class="table-wrap"><table><thead><tr><th>账号</th><th>显示名称</th><th>角色</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead><tbody>
+{% for user in users %}<tr><td><strong>{{ user.username }}</strong></td><td>{{ user.display_name }}</td><td>{{ '管理员' if user.is_admin else '普通用户' }}</td><td><span class="pill {{ 'success' if user.is_active else 'fail' }}">{{ '正常' if user.is_active else '已停用' }}</span></td><td class="muted">{{ user.last_login_at or '从未登录' }}</td><td><div class="actions"><button class="btn small" onclick="resetPassword('{{ user.id }}','{{ user.username }}')">重置密码</button><button class="btn small danger" onclick="toggleUser('{{ user.id }}')">{{ '停用' if user.is_active else '启用' }}</button></div></td></tr>{% endfor %}
+</tbody></table></div></section>
+<dialog id="userDialog"><div class="dialog-body"><div class="section-head"><h2>新建账号</h2><button class="btn small" onclick="userDialog.close()">关闭</button></div><div class="field"><label>登录账号</label><input id="newUsername"></div><div class="field" style="margin-top:12px"><label>显示名称</label><input id="newDisplay"></div><div class="field" style="margin-top:12px"><label>角色</label><select id="newRole"><option value="user">普通用户</option><option value="admin">管理员</option></select></div><div class="field" style="margin-top:12px"><label>临时密码</label><input id="newPassword" type="password"></div><button class="btn primary" style="margin-top:18px;width:100%" onclick="createUser(this)">创建账号</button></div></dialog>
+{% endblock %}
+{% block scripts %}
+<script>
+const adminStatus=document.querySelector('#adminStatus');
+async function createUser(btn){FBA.buttonBusy(btn,true);try{const d=await FBA.api('/api/admin/users',{method:'POST',body:{username:newUsername.value,display_name:newDisplay.value,role:newRole.value,password:newPassword.value}});FBA.showStatus(adminStatus,d.message,'ok');userDialog.close();setTimeout(()=>location.reload(),450)}catch(e){FBA.showStatus(adminStatus,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
+async function toggleUser(id){if(!confirm('确定更改这个账号的启用状态？'))return;try{await FBA.api(`/api/admin/users/${id}/toggle`,{method:'POST'});location.reload()}catch(e){FBA.showStatus(adminStatus,e.message,'error')}}
+async function resetPassword(id,name){const password=prompt(`请输入 ${name} 的新临时密码（至少8位）`);if(!password)return;try{const d=await FBA.api(`/api/admin/users/${id}/reset-password`,{method:'POST',body:{password}});FBA.showStatus(adminStatus,d.message+'；用户下次登录必须修改。','ok')}catch(e){FBA.showStatus(adminStatus,e.message,'error')}}
+</script>
+{% endblock %}

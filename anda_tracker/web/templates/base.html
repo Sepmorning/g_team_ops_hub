@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>{% block title %}FBA运营工作台{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">FBA TRACKER<small>运营工作台</small></div>
+    <nav class="nav">
+      <a href="/dashboard" class="{{ 'active' if active == 'dashboard' else '' }}"><span class="nav-icon">⌂</span><span>工作台概览</span></a>
+      <a href="/tracking" class="{{ 'active' if active == 'tracking' else '' }}"><span class="nav-icon">⌕</span><span>物流查询</span></a>
+      <a href="/carriers" class="{{ 'active' if active == 'carriers' else '' }}"><span class="nav-icon">⚙</span><span>货代连接</span></a>
+      <a href="/shops" class="{{ 'active' if active == 'shops' else '' }}"><span class="nav-icon">▣</span><span>我的店铺</span></a>
+      <a href="/inventory" class="{{ 'active' if active == 'inventory' else '' }}"><span class="nav-icon">▤</span><span>库存销售表格</span></a>
+      {% if account and account.is_admin %}
+      <a href="/admin" class="{{ 'active' if active == 'admin' else '' }}"><span class="nav-icon">♙</span><span>账号管理</span></a>
+      {% endif %}
+    </nav>
+    <div class="sidebar-user">
+      <strong>{{ account.display_name }}</strong>
+      <span>{{ '管理员' if account.is_admin else '普通用户' }}</span>
+      <a href="/change-password" style="display:block;color:#d0d5dd;padding-top:9px;font-size:12px">修改登录密码</a>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="logout" type="submit">退出登录</button>
+      </form>
+    </div>
+  </aside>
+  <main class="main">{% block content %}{% endblock %}</main>
+</div>
+<script src="/static/app.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -12,14 +12,6 @@ class CarrierError(Exception):
         self.user_message = user_message
 
 
-class AndaError(CarrierError):
-    """安达模块异常。"""
-
-
-class ChaoHongError(CarrierError):
-    """超鸿模块异常。"""
-
-
 class NetworkError(CarrierError):
     category = "network"
     retryable = True

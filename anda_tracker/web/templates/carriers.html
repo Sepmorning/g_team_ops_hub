@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}货代连接 · FBA运营工作台{% endblock %}
+{% block content %}
+<header class="page-head"><div><h1>货代连接</h1><p>维护当前账号自己的货代连接。后续新增货代时会继续放在这个页面。</p></div><button class="btn" onclick="checkAll(this)">检查全部连接</button></header>
+<div id="globalStatus" class="status"></div>
+<section class="grid cols-3" style="margin-bottom:18px">
+  <article class="card"><div class="section-head"><h3>安达</h3><span id="status-anda" class="pill {{ 'success' if anda_username else 'fail' }}">{{ '已配置' if anda_username else '未配置' }}</span></div><p>{{ ('当前保存账号：' ~ anda_username) if anda_username else '当前账号尚未配置安达。' }}</p></article>
+  <article class="card"><div class="section-head"><h3>超鸿</h3><span id="status-chaohong" class="pill success">无需登录</span></div><p>超鸿使用公开查询接口，不需要保存账号密码。</p></article>
+  <article class="card"><div class="section-head"><h3>易通</h3><span id="status-yitong" class="pill {{ 'success' if yitong_logged_in else 'fail' }}">{{ '已登录' if yitong_logged_in else '需要登录' }}</span></div><p>{{ ('当前保存账号：' ~ yitong_username) if yitong_username else '当前账号尚未配置易通。' }}</p></article>
+</section>
+<section class="grid cols-2">
+  <article class="card"><div class="section-head"><div><h2>安达</h2><span class="muted">输入新值时才会替换当前保存账号</span></div></div>
+    <form autocomplete="off" onsubmit="return false"><div class="form-grid"><div class="field"><label>新账号</label><input id="andaUser" readonly onfocus="this.removeAttribute('readonly')" autocomplete="one-time-code" data-lpignore="true" placeholder="{{ '留空沿用当前账号' if anda_username else '请输入安达账号' }}"></div><div class="field"><label>密码</label><input id="andaPass" type="password" readonly onfocus="this.removeAttribute('readonly')" autocomplete="new-password" data-lpignore="true" placeholder="请输入密码"></div></div></form>
+    <div class="actions" style="margin-top:15px"><button class="btn primary" onclick="saveAnda(this)">保存并登录</button><button class="btn danger" onclick="removeConfig('anda')">删除</button></div>
+  </article>
+  <article class="card"><div class="section-head"><div><h2>易通</h2><span class="muted">验证码始终由用户人工输入</span></div></div>
+    <form autocomplete="off" onsubmit="return false"><div class="form-grid"><div class="field"><label>新账号</label><input id="ytUser" readonly onfocus="this.removeAttribute('readonly')" autocomplete="one-time-code" data-lpignore="true" placeholder="{{ '留空沿用当前账号' if yitong_username else '请输入易通账号' }}"></div><div class="field"><label>密码</label><input id="ytPass" type="password" readonly onfocus="this.removeAttribute('readonly')" autocomplete="new-password" data-lpignore="true" placeholder="请输入密码"></div></div></form>
+    <div class="captcha-row" style="margin-top:13px"><img id="captchaImage" class="captcha-image" alt="请刷新验证码"><div class="field"><label>验证码</label><input id="captchaCode" autocomplete="off"></div><button class="btn" onclick="refreshCaptcha(this)">刷新</button></div>
+    <div class="actions" style="margin-top:15px"><button class="btn primary" onclick="loginYitong(this)">保存并登录</button><button class="btn danger" onclick="removeConfig('yitong')">删除</button></div>
+  </article>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+const statusBox=document.querySelector('#globalStatus'); let challengeId='';
+const currentAnda={{ anda_username|tojson }}; const currentYitong={{ yitong_username|tojson }};
+function renderCarrierStatuses(items){const ids={'安达':'anda','超鸿':'chaohong','易通':'yitong'};items.forEach(s=>{const el=document.querySelector(`#status-${ids[s.carrier]}`);if(el){el.textContent=s.connected?`已连接 · ${s.message}`:`未连接 · ${s.message}`;el.className=`pill ${s.connected?'success':'fail'}`;}})}
+async function checkAll(btn){FBA.buttonBusy(btn,true,'检查中…');try{const d=await FBA.api('/api/carriers/status?live=1');renderCarrierStatuses(d.statuses);const failed=d.statuses.filter(s=>!s.connected);FBA.showStatus(statusBox,failed.length?failed.map(s=>`${s.carrier}：${s.message}`).join('；'):'三家货代连接均正常',failed.length?'error':'ok')}catch(e){FBA.showStatus(statusBox,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
+async function saveAnda(btn){const username=andaUser.value.trim()||currentAnda;if(!username||!andaPass.value)return FBA.showStatus(statusBox,'请输入安达账号和密码','error');FBA.buttonBusy(btn,true);try{const d=await FBA.api('/api/carriers/anda',{method:'POST',body:{username,password:andaPass.value}});FBA.showStatus(statusBox,d.message,'ok');setTimeout(()=>location.reload(),500)}catch(e){FBA.showStatus(statusBox,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
+async function refreshCaptcha(btn){FBA.buttonBusy(btn,true);try{const d=await FBA.api('/api/carriers/yitong/captcha-challenges',{method:'POST'});challengeId=d.challenge_id;captchaImage.src=d.image;FBA.showStatus(statusBox,'验证码已刷新，请输入图片内容。','info')}catch(e){FBA.showStatus(statusBox,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
+async function loginYitong(btn){const username=ytUser.value.trim()||currentYitong;if(!username||!ytPass.value)return FBA.showStatus(statusBox,'请输入易通账号和密码','error');if(!challengeId)return FBA.showStatus(statusBox,'请先刷新验证码','error');FBA.buttonBusy(btn,true);try{const d=await FBA.api('/api/carriers/yitong/session',{method:'POST',body:{username,password:ytPass.value,code:captchaCode.value,challenge_id:challengeId}});FBA.showStatus(statusBox,d.message,'ok');setTimeout(()=>location.reload(),500)}catch(e){FBA.showStatus(statusBox,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
+async function removeConfig(kind){if(!confirm('确定删除当前账号的这项货代配置？'))return;try{const d=await FBA.api(`/api/carriers/${kind}`,{method:'DELETE'});FBA.showStatus(statusBox,d.message,'ok');setTimeout(()=>location.reload(),400)}catch(e){FBA.showStatus(statusBox,e.message,'error')}}
+</script>
+{% endblock %}

@@ -30,11 +30,3 @@ def parse_fba_input(raw: str) -> ParseResult:
         valid.append(normalized)
 
     return ParseResult(valid=valid, invalid=invalid, duplicates=duplicates)
-
-
-def enforce_limit(fbas: list[str], maximum: int) -> None:
-    if maximum < 1:
-        raise ValueError("单次最大数量必须大于 0")
-    if len(fbas) > maximum:
-        raise ValueError(f"有效 FBA 共 {len(fbas)} 个，超过当前单次上限 {maximum} 个")
-

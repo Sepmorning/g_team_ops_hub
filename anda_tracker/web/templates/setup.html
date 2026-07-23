@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}"><title>初始化 · FBA运营工作台</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head><body class="auth-page">
+<div class="auth-shell">
+  <section class="auth-brand">
+    <div class="brand">FBA TRACKER</div><h1>创建你的<br>运营工作台</h1>
+    <p>旧桌面版配置会先备份，再安全归属到首个管理员账号。</p>
+  </section>
+  <section class="auth-card">
+    <h2>创建首个管理员</h2><p>系统没有默认密码，请设置你自己的登录信息。</p>
+    {% if error %}<div class="status show error">{{ error }}</div>{% endif %}
+    <form method="post" action="/setup">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field"><label>登录账号</label><input name="username" required autofocus></div>
+      <div class="field"><label>显示名称</label><input name="display_name" required></div>
+      <div class="field"><label>登录密码</label><input name="password" type="password" required minlength="8"></div>
+      <div class="field"><label>确认密码</label><input name="confirm_password" type="password" required minlength="8"></div>
+      <button class="btn primary" type="submit">创建并进入系统</button>
+    </form>
+  </section>
+</div></body></html>
+

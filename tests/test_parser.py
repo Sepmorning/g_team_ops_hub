@@ -1,6 +1,4 @@
-import pytest
-
-from anda_tracker.parser import enforce_limit, parse_fba_input
+from anda_tracker.parser import parse_fba_input
 
 
 def test_parses_all_supported_separators_and_normalizes_case():
@@ -23,10 +21,3 @@ def test_rejects_invalid_and_stably_deduplicates():
     assert result.valid == ["FBA123456", "FBA999999"]
     assert result.duplicates == ["FBA123456"]
     assert result.invalid == ["rubbish", "FB", "FBA@123"]
-
-
-def test_limit_accepts_boundary_and_rejects_excess():
-    enforce_limit(["FBA111", "FBA222"], 2)
-    with pytest.raises(ValueError, match="超过当前单次上限"):
-        enforce_limit(["FBA111", "FBA222", "FBA333"], 2)
-

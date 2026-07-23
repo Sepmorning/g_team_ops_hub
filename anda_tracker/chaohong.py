@@ -12,6 +12,7 @@ from .models import QueryStatus, TrackingResult
 
 
 CH_BATCH_URL = "http://8.210.173.142:3000/api/traces/batch/"
+CH_QUERY_BATCH_SIZE = 50
 
 
 class ChaoHongClient:
@@ -81,8 +82,19 @@ class ChaoHongClient:
 
 
 class ChaoHongQueryService:
-    def __init__(self, client: ChaoHongClient):
+    carrier = "超鸿"
+
+    def __init__(
+        self,
+        client: ChaoHongClient,
+        batch_size: int = CH_QUERY_BATCH_SIZE,
+        request_interval: float = 0.5,
+        sleeper: Callable[[float], None] = time.sleep,
+    ):
         self.client = client
+        self.batch_size = max(1, min(CH_QUERY_BATCH_SIZE, batch_size))
+        self.request_interval = max(0.0, request_interval)
+        self.sleeper = sleeper
 
     @staticmethod
     def _record_keys(record: dict[str, Any]) -> set[str]:
@@ -94,45 +106,49 @@ class ChaoHongQueryService:
         return keys
 
     def query_many(self, fbas: list[str]) -> list[TrackingResult]:
-        try:
-            records = self.client.query_batch(fbas)
-        except CarrierError as exc:
-            return [
-                TrackingResult(
-                    fba=fba,
-                    status=QueryStatus.FAILED,
-                    carrier="超鸿",
-                    error_category=exc.category,
-                    error_message=exc.user_message,
-                )
-                for fba in fbas
-            ]
-
-        found: dict[str, dict[str, Any]] = {}
-        requested = set(fbas)
-        for record in records:
-            if not isinstance(record, dict):
-                continue
-            for key in self._record_keys(record) & requested:
-                found[key] = record
-
-        results: list[TrackingResult] = []
-        for fba in fbas:
-            record = found.get(fba)
-            if record is None:
-                results.append(TrackingResult(fba=fba, status=QueryStatus.NOT_FOUND, carrier="超鸿"))
-                continue
-            place = str(record.get("place") or "").strip()
-            detail = str(record.get("detail") or record.get("status_name") or "").strip()
-            latest_event = " - ".join(part for part in (place, detail) if part)
-            results.append(
-                TrackingResult(
-                    fba=fba,
-                    status=QueryStatus.SUCCESS,
-                    carrier="超鸿",
-                    latest_time=str(record.get("happened_at") or record.get("trace_at") or ""),
-                    latest_event=latest_event,
-                )
-            )
-        return results
-
+        results: dict[str, TrackingResult] = {}
+        for offset in range(0, len(fbas), self.batch_size):
+            batch = fbas[offset : offset + self.batch_size]
+            try:
+                records = self.client.query_batch(batch)
+                found: dict[str, dict[str, Any]] = {}
+                requested = set(batch)
+                for record in records:
+                    if not isinstance(record, dict):
+                        continue
+                    for key in self._record_keys(record) & requested:
+                        found[key] = record
+                for fba in batch:
+                    record = found.get(fba)
+                    if record is None:
+                        results[fba] = TrackingResult(
+                            fba=fba, status=QueryStatus.NOT_FOUND, carrier="超鸿"
+                        )
+                        continue
+                    place = str(record.get("place") or "").strip()
+                    detail = str(
+                        record.get("detail") or record.get("status_name") or ""
+                    ).strip()
+                    results[fba] = TrackingResult(
+                        fba=fba,
+                        status=QueryStatus.SUCCESS,
+                        carrier="超鸿",
+                        latest_time=str(
+                            record.get("happened_at") or record.get("trace_at") or ""
+                        ),
+                        latest_event=" - ".join(
+                            part for part in (place, detail) if part
+                        ),
+                    )
+            except CarrierError as exc:
+                for fba in batch:
+                    results[fba] = TrackingResult(
+                        fba=fba,
+                        status=QueryStatus.FAILED,
+                        carrier="超鸿",
+                        error_category=exc.category,
+                        error_message=exc.user_message,
+                    )
+            if offset + self.batch_size < len(fbas) and self.request_interval:
+                self.sleeper(self.request_interval)
+        return [results[fba] for fba in fbas]

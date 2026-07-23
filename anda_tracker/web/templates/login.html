@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}"><title>登录 · FBA运营工作台</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head><body class="auth-page">
+<div class="auth-shell">
+  <section class="auth-brand">
+    <div class="brand">FBA TRACKER</div>
+    <h1>让物流更新<br>清晰、稳定、可追踪</h1>
+    <p>统一查询安达、超鸿和易通，自动识别货代并更新属于你的WPS共享表。</p>
+  </section>
+  <section class="auth-card">
+    <h2>欢迎回来</h2><p>登录后仅能访问属于你的账号、令牌和共享表。</p>
+    {% if created %}<div class="status show ok">管理员创建成功，请登录。</div>{% endif %}
+    {% if error %}<div class="status show error">{{ error }}</div>{% endif %}
+    <form method="post" action="/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field"><label>登录账号</label><input name="username" required autocomplete="username" autofocus></div>
+      <div class="field"><label>登录密码</label><input name="password" type="password" required autocomplete="current-password"></div>
+      <button class="btn primary" type="submit">登录工作台</button>
+    </form>
+    <p style="margin-top:24px;font-size:12px">登录密码不可逆加密保存；管理员也无法查看。</p>
+  </section>
+</div></body></html>
+

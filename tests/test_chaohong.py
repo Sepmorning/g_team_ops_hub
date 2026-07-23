@@ -57,3 +57,17 @@ def test_network_error_retries_finitely_and_marks_every_item_failed():
     assert all(item.status == QueryStatus.FAILED for item in results)
     assert all(item.error_category == "network" for item in results)
 
+
+def test_large_chaohong_input_is_split_to_keep_request_urls_safe():
+    session = FakeSession(
+        [FakeResponse(payload={"code": 101, "data": []}) for _ in range(3)]
+    )
+    service = ChaoHongQueryService(
+        ChaoHongClient(session=session, retries=0),
+        batch_size=50,
+        request_interval=0,
+    )
+    results = service.query_many([f"FBA{index:05d}" for index in range(101)])
+    assert len(session.calls) == 3
+    assert len(results) == 101
+    assert all(item.status == QueryStatus.NOT_FOUND for item in results)
