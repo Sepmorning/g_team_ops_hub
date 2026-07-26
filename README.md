@@ -24,6 +24,7 @@ cd FBA_Tracker
 3. 按 `AirScript升级说明.md` 在自己的WPS工作簿安装版本5脚本，准备 `US-FBA` 和 `US-轨迹明细`。
 4. 进入“我的店铺”，填写店铺名称、共享表链接、脚本Webhook和脚本令牌，然后测试连接。
 5. 进入“物流查询”进行手动查询，或选择店铺执行一键查询并更新。
+6. 如需使用Listing库存销售更新，按 `库存销售表格模块使用说明.md` 准备表头、公式和独立Listing AirScript。
 
 `data/`、`.venv/`、日志、密码、会话和令牌都已被Git忽略。不要强制添加这些
 本机文件；复制仓库也不会复制原电脑的DPAPI密文。
@@ -46,6 +47,8 @@ cd FBA_Tracker
 - 某家未连接不会终止手动查询；本次只调度检查成功的货代，其他货代仍可正常返回和回填
 - 安达查询复用同次实时检查建立的短时内存会话，避免检查后重复登录
 - 安达、易通账号密码使用DPAPI保存；易通会话失效时自动加载已保存凭据，用户只需重新输入验证码
+- 领星Listing导出文件按表头名称识别，选择店铺和国家后预览并更新对应Listing子表
+- FBA可售、预留、在途按领星库存字段聚合；本次/上次数据按日期安全滚动
 
 ## 运行
 
@@ -86,6 +89,7 @@ anda_fba_tracker/
 ├─ anda_tracker/
 │  ├─ web/                 FastAPI路由、页面和静态资源
 │  ├─ airscript.py         WPS AirScript客户端
+│  ├─ listing.py           领星文件解析与Listing AirScript客户端
 │  ├─ auth.py              系统账号
 │  ├─ storage.py           用户隔离的本地数据
 │  ├─ client.py            安达
@@ -116,7 +120,9 @@ anda_fba_tracker/
 
 ## AirScript
 
-正式脚本为 `airscripts\FBA物流自动回填.js`。升级和必需表头见 `AirScript升级说明.md`。
+物流正式脚本为 `airscripts\FBA物流自动回填.js`。升级和必需表头见 `AirScript升级说明.md`。
+Listing使用独立脚本 `airscripts\Listing库存销售自动回填.js`，最终表头、Excel/WPS公式和启用步骤见
+`库存销售表格模块使用说明.md`。两个脚本使用不同Webhook和令牌。
 
 当前脚本结构版本为5，要求工作簿同时存在 `US-FBA` 主表和
 `US-轨迹明细` 子表。两张表都按第一行表头名称定位列，不依赖列字母；

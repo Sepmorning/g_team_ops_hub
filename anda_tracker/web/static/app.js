@@ -2,7 +2,7 @@ const csrfToken = () => document.querySelector('meta[name="csrf-token"]')?.conte
 
 async function api(url, options = {}) {
   const headers = { 'X-CSRF-Token': csrfToken(), ...(options.headers || {}) };
-  if (options.body && typeof options.body !== 'string') {
+  if (options.body && !(options.body instanceof FormData) && typeof options.body !== 'string') {
     headers['Content-Type'] = 'application/json';
     options.body = JSON.stringify(options.body);
   }

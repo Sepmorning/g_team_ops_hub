@@ -88,6 +88,24 @@ class StoredShop:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class StoredListingConnection:
+    shop_id: str
+    webhook_url: str
+    api_token: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class StoredShopCountry:
+    id: str
+    shop_id: str
+    country_name: str
+    sheet_name: str
+    created_at: str
+    updated_at: str
+
+
 class ProjectDatabase:
     """项目内 SQLite：账号按 profile/carrier 隔离，密码字段只保存 DPAPI 密文。"""
 
@@ -184,6 +202,33 @@ class ProjectDatabase:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(profile_id, name)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS listing_connections (
+                    profile_id TEXT NOT NULL,
+                    shop_id TEXT NOT NULL,
+                    webhook_url TEXT NOT NULL,
+                    api_token_ciphertext TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (profile_id, shop_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shop_countries (
+                    id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    shop_id TEXT NOT NULL,
+                    country_name TEXT NOT NULL COLLATE NOCASE,
+                    sheet_name TEXT NOT NULL COLLATE NOCASE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(profile_id, shop_id, country_name),
+                    UNIQUE(profile_id, shop_id, sheet_name)
                 )
                 """
             )
@@ -482,12 +527,195 @@ class ProjectDatabase:
 
     def delete_shop(self, shop_id: str) -> None:
         with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM listing_connections WHERE shop_id=? AND profile_id=?",
+                (shop_id, self.profile_id),
+            )
+            connection.execute(
+                "DELETE FROM shop_countries WHERE shop_id=? AND profile_id=?",
+                (shop_id, self.profile_id),
+            )
             deleted = connection.execute(
                 "DELETE FROM shops WHERE id=? AND profile_id=?",
                 (shop_id, self.profile_id),
             )
         if deleted.rowcount != 1:
             raise ConfigurationError("店铺不存在或不属于当前用户")
+
+    def load_listing_connection(
+        self, shop_id: str
+    ) -> StoredListingConnection | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT shop_id, webhook_url, api_token_ciphertext, updated_at
+                FROM listing_connections
+                WHERE profile_id=? AND shop_id=?
+                """,
+                (self.profile_id, shop_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return StoredListingConnection(
+            shop_id=str(row[0]),
+            webhook_url=str(row[1]),
+            api_token=unprotect_secret(str(row[2])),
+            updated_at=str(row[3]),
+        )
+
+    def save_listing_connection(
+        self, shop_id: str, webhook_url: str, api_token: str
+    ) -> StoredListingConnection:
+        if self.get_shop(shop_id) is None:
+            raise ConfigurationError("店铺不存在或不属于当前用户")
+        webhook_url = webhook_url.strip()
+        if not webhook_url or not api_token:
+            raise ConfigurationError("Listing脚本Webhook和令牌不能为空")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        ciphertext = protect_secret(api_token)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO listing_connections(
+                    profile_id, shop_id, webhook_url,
+                    api_token_ciphertext, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(profile_id, shop_id) DO UPDATE SET
+                    webhook_url=excluded.webhook_url,
+                    api_token_ciphertext=excluded.api_token_ciphertext,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    self.profile_id,
+                    shop_id,
+                    webhook_url,
+                    ciphertext,
+                    timestamp,
+                ),
+            )
+        stored = self.load_listing_connection(shop_id)
+        assert stored is not None
+        return stored
+
+    def list_shop_countries(self, shop_id: str) -> list[StoredShopCountry]:
+        if self.get_shop(shop_id) is None:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, shop_id, country_name, sheet_name, created_at, updated_at
+                FROM shop_countries
+                WHERE profile_id=? AND shop_id=?
+                ORDER BY created_at, country_name
+                """,
+                (self.profile_id, shop_id),
+            ).fetchall()
+        return [
+            StoredShopCountry(
+                id=str(row[0]),
+                shop_id=str(row[1]),
+                country_name=str(row[2]),
+                sheet_name=str(row[3]),
+                created_at=str(row[4]),
+                updated_at=str(row[5]),
+            )
+            for row in rows
+        ]
+
+    def get_shop_country(self, country_id: str) -> StoredShopCountry | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, shop_id, country_name, sheet_name, created_at, updated_at
+                FROM shop_countries
+                WHERE profile_id=? AND id=?
+                """,
+                (self.profile_id, country_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return StoredShopCountry(
+            id=str(row[0]),
+            shop_id=str(row[1]),
+            country_name=str(row[2]),
+            sheet_name=str(row[3]),
+            created_at=str(row[4]),
+            updated_at=str(row[5]),
+        )
+
+    def save_shop_country(
+        self,
+        shop_id: str,
+        country_name: str,
+        sheet_name: str,
+        country_id: str | None = None,
+    ) -> StoredShopCountry:
+        if self.get_shop(shop_id) is None:
+            raise ConfigurationError("店铺不存在或不属于当前用户")
+        country_name = country_name.strip()
+        sheet_name = sheet_name.strip()
+        if not country_name or len(country_name) > 40:
+            raise ConfigurationError("国家名称不能为空且不能超过40位")
+        if not sheet_name or len(sheet_name) > 80:
+            raise ConfigurationError("Listing子表名称不能为空且不能超过80位")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._connect() as connection:
+                if country_id:
+                    updated = connection.execute(
+                        """
+                        UPDATE shop_countries
+                        SET country_name=?, sheet_name=?, updated_at=?
+                        WHERE id=? AND profile_id=? AND shop_id=?
+                        """,
+                        (
+                            country_name,
+                            sheet_name,
+                            timestamp,
+                            country_id,
+                            self.profile_id,
+                            shop_id,
+                        ),
+                    )
+                    if updated.rowcount != 1:
+                        raise ConfigurationError(
+                            "国家配置不存在或不属于当前店铺"
+                        )
+                else:
+                    country_id = secrets.token_hex(16)
+                    connection.execute(
+                        """
+                        INSERT INTO shop_countries(
+                            id, profile_id, shop_id, country_name,
+                            sheet_name, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            country_id,
+                            self.profile_id,
+                            shop_id,
+                            country_name,
+                            sheet_name,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+        except sqlite3.IntegrityError as exc:
+            raise ConfigurationError(
+                "当前店铺已存在同名国家或相同Listing子表"
+            ) from exc
+        stored = self.get_shop_country(country_id)
+        assert stored is not None
+        return stored
+
+    def delete_shop_country(self, country_id: str) -> None:
+        with self._connect() as connection:
+            deleted = connection.execute(
+                "DELETE FROM shop_countries WHERE id=? AND profile_id=?",
+                (country_id, self.profile_id),
+            )
+        if deleted.rowcount != 1:
+            raise ConfigurationError("国家配置不存在或不属于当前用户")
 
     def query_batch_size(self) -> int:
         """单个内部查询批次上限；不限制用户一次任务的总数量。"""

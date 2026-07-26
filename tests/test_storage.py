@@ -143,3 +143,41 @@ def test_tracking_detail_cache_is_local_and_isolated_by_profile(tmp_path):
     assert cached[:3] == (1, "2026-07-20", "已到港")
     assert cached[3] == payload
     assert second.load_tracking_cache("anda", "FBA11111") is None
+
+
+def test_listing_connection_and_country_mapping_are_encrypted_and_isolated(tmp_path):
+    path = tmp_path / "app.db"
+    first = ProjectDatabase(path, profile_id="user-one")
+    second = ProjectDatabase(path, profile_id="user-two")
+    shop = first.save_shop(
+        "纯粹",
+        AirScriptConfig(
+            "https://www.kdocs.cn/l/share-one",
+            "https://www.kdocs.cn/api/v3/ide/file/f1/script/logistics/sync_task",
+            "logistics-token",
+        ),
+    )
+    first.save_listing_connection(
+        shop.id,
+        "https://www.kdocs.cn/api/v3/ide/file/f1/script/listing/sync_task",
+        "listing-secret-token",
+    )
+    country = first.save_shop_country(
+        shop.id, "美国", "纯粹-美国"
+    )
+
+    loaded = first.load_listing_connection(shop.id)
+    assert loaded is not None
+    assert loaded.api_token == "listing-secret-token"
+    assert first.get_shop_country(country.id).sheet_name == "纯粹-美国"
+    assert second.load_listing_connection(shop.id) is None
+    assert second.get_shop_country(country.id) is None
+    with sqlite3.connect(path) as connection:
+        ciphertext = connection.execute(
+            "SELECT api_token_ciphertext FROM listing_connections"
+        ).fetchone()[0]
+    assert "listing-secret-token" not in ciphertext
+
+    first.delete_shop(shop.id)
+    assert first.load_listing_connection(shop.id) is None
+    assert first.get_shop_country(country.id) is None

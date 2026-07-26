@@ -18,6 +18,15 @@ from ..auth import UserAccount, UserRepository
 from ..client import AndaClient
 from ..errors import CarrierError, ConfigurationError
 from ..logging_config import configure_logging
+from ..listing import (
+    MAX_LISTING_FILE_SIZE,
+    ListingAirScriptClient,
+    ListingConnectionConfig,
+    ListingPreviewRegistry,
+    infer_listing_data_date,
+    parse_listing_export,
+    validate_listing_data_date,
+)
 from ..parser import parse_fba_input
 from ..storage import ProjectDatabase, protect_secret, unprotect_secret
 from .services import (
@@ -78,6 +87,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     settings_path = data_dir / "settings.json"
     coordinator = QueryCoordinator(database_path, settings_path)
     captcha_registry = CaptchaRegistry()
+    listing_preview_registry = ListingPreviewRegistry()
 
     app = FastAPI(
         title="FBA运营工作台",
@@ -101,6 +111,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     app.state.users = user_repository
     app.state.coordinator = coordinator
     app.state.captchas = captcha_registry
+    app.state.listing_previews = listing_preview_registry
     app.state.logger = logger
 
     async def json_payload(request: Request) -> dict[str, Any]:
@@ -141,6 +152,29 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if account.must_change_password:
             raise HTTPException(status_code=403, detail="请先修改临时登录密码")
         return account
+
+    def listing_config(
+        database: ProjectDatabase, shop_id: str, country_id: str
+    ) -> tuple[ListingConnectionConfig, Any, Any]:
+        shop = database.get_shop(shop_id)
+        if shop is None:
+            raise ConfigurationError("店铺不存在或不属于当前用户")
+        country = database.get_shop_country(country_id)
+        if country is None or country.shop_id != shop_id:
+            raise ConfigurationError("国家配置不存在或不属于当前店铺")
+        connection = database.load_listing_connection(shop_id)
+        if connection is None:
+            raise ConfigurationError("该店铺尚未配置独立的Listing AirScript")
+        return (
+            ListingConnectionConfig(
+                share_url=shop.config.share_url,
+                webhook_url=connection.webhook_url,
+                api_token=connection.api_token,
+                sheet_name=country.sheet_name,
+            ),
+            shop,
+            country,
+        )
 
     @app.get("/health")
     async def health():
@@ -358,7 +392,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.get("/inventory", response_class=HTMLResponse)
     async def inventory_page(request: Request):
-        return render_private(request, "inventory.html", active="inventory")
+        account = current_account(request)
+        if account is None:
+            return RedirectResponse("/login", status_code=303)
+        if account.must_change_password:
+            return RedirectResponse("/change-password", status_code=303)
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        return templates.TemplateResponse(
+            request=request,
+            name="inventory.html",
+            context=page_context(
+                request,
+                account,
+                active="inventory",
+                shops=database.list_shops(),
+            ),
+        )
 
     @app.get("/admin", response_class=HTMLResponse)
     async def admin_page(request: Request):
@@ -659,6 +708,294 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 f"FBA列{binding.fba_column}，货代列{binding.carrier_column}，"
                 f"路由列{binding.route_column}"
             ),
+        }
+
+    @app.get("/api/inventory/config")
+    async def inventory_config_api(request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        shop_id = str(request.query_params.get("shop_id") or "").strip()
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        shop = database.get_shop(shop_id)
+        if shop is None:
+            return _json_error("店铺不存在或不属于当前用户", 404)
+        connection = database.load_listing_connection(shop_id)
+        countries = database.list_shop_countries(shop_id)
+        return {
+            "ok": True,
+            "shop": {
+                "id": shop.id,
+                "name": shop.name,
+                "share_url": shop.config.share_url,
+            },
+            "connection": (
+                {
+                    "configured": True,
+                    "webhook_url": connection.webhook_url,
+                    "updated_at": connection.updated_at,
+                }
+                if connection
+                else {"configured": False, "webhook_url": "", "updated_at": ""}
+            ),
+            "countries": [
+                {
+                    "id": item.id,
+                    "country_name": item.country_name,
+                    "sheet_name": item.sheet_name,
+                }
+                for item in countries
+            ],
+        }
+
+    @app.post("/api/shops/{shop_id}/listing-connection")
+    async def save_listing_connection_api(shop_id: str, request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await json_payload(request)
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        shop = database.get_shop(shop_id)
+        if shop is None:
+            return _json_error("店铺不存在或不属于当前用户", 404)
+        existing = database.load_listing_connection(shop_id)
+        token = str(payload.get("api_token") or "")
+        if not token and existing:
+            token = existing.api_token
+        webhook_url = str(payload.get("webhook_url") or "")
+        try:
+            # 构造客户端只执行格式与共享链接校验；添加国家时再连接实际子表。
+            ListingAirScriptClient(
+                ListingConnectionConfig(
+                    share_url=shop.config.share_url,
+                    webhook_url=webhook_url,
+                    api_token=token,
+                    sheet_name="待选择Listing子表",
+                ),
+                retries=coordinator.settings.retries,
+            )
+            database.save_listing_connection(shop_id, webhook_url, token)
+        except (CarrierError, ConfigurationError) as exc:
+            return _json_error(exc.user_message)
+        return {
+            "ok": True,
+            "message": "独立Listing AirScript连接已加密保存；请添加国家并验证对应子表",
+        }
+
+    @app.post("/api/shops/{shop_id}/countries")
+    async def save_shop_country_api(shop_id: str, request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await json_payload(request)
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        shop = database.get_shop(shop_id)
+        if shop is None:
+            return _json_error("店铺不存在或不属于当前用户", 404)
+        connection = database.load_listing_connection(shop_id)
+        if connection is None:
+            return _json_error("请先保存该店铺的独立Listing AirScript连接")
+        sheet_name = str(payload.get("sheet_name") or "").strip()
+        config = ListingConnectionConfig(
+            share_url=shop.config.share_url,
+            webhook_url=connection.webhook_url,
+            api_token=connection.api_token,
+            sheet_name=sheet_name,
+        )
+        try:
+            binding = await asyncio.to_thread(
+                ListingAirScriptClient(
+                    config, retries=coordinator.settings.retries
+                ).validate
+            )
+            country = database.save_shop_country(
+                shop_id,
+                str(payload.get("country_name") or ""),
+                sheet_name,
+                country_id=str(payload.get("id") or "").strip() or None,
+            )
+        except (CarrierError, ConfigurationError) as exc:
+            return _json_error(exc.user_message)
+        except Exception:
+            logger.exception(
+                "listing_country_validation_unexpected user=%s shop=%s",
+                account.id,
+                shop_id,
+            )
+            return _json_error("验证Listing子表时发生未预期错误", 500)
+        return {
+            "ok": True,
+            "country": {
+                "id": country.id,
+                "country_name": country.country_name,
+                "sheet_name": country.sheet_name,
+            },
+            "message": (
+                f"已连接“{binding.sheet_name}”，在第{binding.header_row}行"
+                f"按名称识别{len(binding.columns)}个标准表头"
+            ),
+        }
+
+    @app.delete("/api/inventory/countries/{country_id}")
+    async def delete_shop_country_api(country_id: str, request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        try:
+            database.delete_shop_country(country_id)
+        except ConfigurationError as exc:
+            return _json_error(exc.user_message, 404)
+        return {"ok": True, "message": "国家与Listing子表映射已删除"}
+
+    @app.post("/api/inventory/countries/{country_id}/validation")
+    async def validate_listing_country_api(country_id: str, request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await json_payload(request)
+        shop_id = str(payload.get("shop_id") or "").strip()
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        try:
+            config, _shop, _country = listing_config(
+                database, shop_id, country_id
+            )
+            binding = await asyncio.to_thread(
+                ListingAirScriptClient(
+                    config, retries=coordinator.settings.retries
+                ).validate
+            )
+        except (CarrierError, ConfigurationError) as exc:
+            return _json_error(exc.user_message)
+        return {
+            "ok": True,
+            "message": (
+                f"已连接“{binding.sheet_name}”，表头位于第{binding.header_row}行，"
+                f"已按名称识别{len(binding.columns)}列"
+            ),
+        }
+
+    @app.post("/api/inventory/imports/preview")
+    async def preview_listing_import_api(request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        try:
+            content_length = int(request.headers.get("Content-Length") or 0)
+        except ValueError:
+            content_length = 0
+        if content_length > MAX_LISTING_FILE_SIZE + 1024 * 1024:
+            return _json_error("上传内容超过21MB安全上限", 413)
+        form = await request.form()
+        shop_id = str(form.get("shop_id") or "").strip()
+        country_id = str(form.get("country_id") or "").strip()
+        filename_date = infer_listing_data_date(
+            str(getattr(form.get("file"), "filename", "") or "")
+        )
+        try:
+            data_date = validate_listing_data_date(
+                str(form.get("data_date") or filename_date)
+            )
+            database = ProjectDatabase(database_path, profile_id=account.id)
+            config, shop, country = listing_config(
+                database, shop_id, country_id
+            )
+            uploaded = form.get("file")
+            if uploaded is None or not hasattr(uploaded, "read"):
+                raise ConfigurationError("请选择领星导出的.xlsx文件")
+            filename = str(getattr(uploaded, "filename", "") or "")
+            if not filename.lower().endswith(".xlsx"):
+                raise ConfigurationError("只支持领星导出的.xlsx文件")
+            content = await uploaded.read(MAX_LISTING_FILE_SIZE + 1)
+            parsed = await asyncio.to_thread(parse_listing_export, content)
+            binding = await asyncio.to_thread(
+                ListingAirScriptClient(
+                    config, retries=coordinator.settings.retries
+                ).validate
+            )
+            preview_id = listing_preview_registry.create(
+                account.id,
+                shop_id,
+                country_id,
+                data_date,
+                filename,
+                parsed,
+            )
+        except (CarrierError, ConfigurationError) as exc:
+            return _json_error(exc.user_message)
+        except Exception:
+            logger.exception(
+                "listing_preview_unexpected user=%s shop=%s",
+                account.id,
+                shop_id,
+            )
+            return _json_error("读取领星文件时发生未预期错误", 500)
+        logger.info(
+            "listing_preview_ready user=%s shop=%s country=%s rows=%d",
+            account.id,
+            shop_id,
+            country_id,
+            len(parsed.rows),
+        )
+        return {
+            "ok": True,
+            "preview_id": preview_id,
+            "filename": filename,
+            "data_date": data_date,
+            "shop_name": shop.name,
+            "country_name": country.country_name,
+            "sheet_name": binding.sheet_name,
+            "source_sheet_name": parsed.sheet_name,
+            "source_header_row": parsed.header_row,
+            "row_count": len(parsed.rows),
+            "duplicate_mskus": list(parsed.duplicate_mskus),
+            "skipped_rows": list(parsed.skipped_rows),
+            "ignored_headers": list(parsed.ignored_headers),
+            "sample": [item.preview_dict() for item in parsed.rows[:30]],
+        }
+
+    @app.post("/api/inventory/imports/apply")
+    async def apply_listing_import_api(request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await json_payload(request)
+        preview_id = str(payload.get("preview_id") or "").strip()
+        try:
+            pending = listing_preview_registry.get(account.id, preview_id)
+            database = ProjectDatabase(database_path, profile_id=account.id)
+            config, shop, country = listing_config(
+                database, pending.shop_id, pending.country_id
+            )
+            summary = await asyncio.to_thread(
+                ListingAirScriptClient(
+                    config, retries=coordinator.settings.retries
+                ).sync,
+                pending.parsed.rows,
+                pending.data_date,
+            )
+        except (CarrierError, ConfigurationError) as exc:
+            return _json_error(exc.user_message)
+        except Exception:
+            logger.exception(
+                "listing_apply_unexpected user=%s preview=%s",
+                account.id,
+                preview_id,
+            )
+            return _json_error("回填Listing共享表时发生未预期错误", 500)
+        logger.info(
+            "listing_apply_complete user=%s shop=%s country=%s updated=%d same=%d",
+            account.id,
+            pending.shop_id,
+            pending.country_id,
+            len(summary.updated),
+            len(summary.same_date_updated),
+        )
+        return {
+            "ok": True,
+            "message": f"{shop.name} / {country.country_name}：{summary.message}",
+            "summary": {
+                "updated": summary.updated,
+                "same_date_updated": summary.same_date_updated,
+                "stale": summary.stale,
+                "not_in_sheet": summary.not_in_sheet,
+                "duplicate_rows": summary.duplicate_rows,
+                "conflicts": summary.conflicts,
+                "failures": summary.failures,
+            },
         }
 
     @app.post("/api/shops/{shop_id}/tracking-sync")

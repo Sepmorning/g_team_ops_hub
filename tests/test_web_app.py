@@ -57,7 +57,7 @@ def test_web_setup_login_and_private_pages(tmp_path):
         assert "物流查询" in client.get("/tracking").text
         assert "货代连接" in client.get("/carriers").text
         assert "我的店铺" in client.get("/shops").text
-        assert "模块尚未开始开发" in client.get("/inventory").text
+        assert "请先添加店铺" in client.get("/inventory").text
         assert "账号管理" in client.get("/admin").text
 
 
