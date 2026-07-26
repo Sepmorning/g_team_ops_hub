@@ -6,11 +6,17 @@ import requests
 from anda_tracker.airscript import (
     AirScriptClient,
     AirScriptConfig,
+    AIRSCRIPT_RICH_WRITE_BATCH_SIZE,
     AIRSCRIPT_WRITE_BATCH_SIZE,
     validate_webhook_url,
 )
 from anda_tracker.errors import AuthenticationError, ConfigurationError, NetworkError, ResponseError
-from anda_tracker.models import QueryStatus, TrackingResult
+from anda_tracker.models import (
+    QueryStatus,
+    TrackingEvent,
+    TrackingResult,
+    TrackingSnapshot,
+)
 
 
 WEBHOOK = "https://www.kdocs.cn/api/v3/ide/file/file-id/script/script-id/sync_task"
@@ -47,6 +53,12 @@ def config(token="placeholder-airscript-token"):
 
 
 def finished(result):
+    if isinstance(result, dict) and result.get("success") is True:
+        result = {
+            "schemaVersion": 5,
+            "detailSheetName": "US-轨迹明细",
+            **result,
+        }
     return {"status": "finished", "error": "", "data": {"result": result}}
 
 
@@ -78,7 +90,12 @@ def test_validate_reads_auto_detected_columns_and_never_places_token_in_body():
                     {
                         "success": True,
                         "sheetName": "US-FBA",
-                        "columns": {"fba": "E", "route": "Q", "completion": "F"},
+                        "columns": {
+                            "fba": "E",
+                            "carrier": "G",
+                            "route": "Q",
+                            "completion": "F",
+                        },
                     }
                 )
             )
@@ -89,6 +106,7 @@ def test_validate_reads_auto_detected_columns_and_never_places_token_in_body():
     assert binding.fba_column == "E"
     assert binding.route_column == "Q"
     assert binding.completion_column == "F"
+    assert binding.carrier_column == "G"
     _, kwargs = session.calls[0]
     assert kwargs["headers"]["AirScript-Token"] == "placeholder-airscript-token"
     assert "placeholder-airscript-token" not in json.dumps(kwargs["json"])
@@ -99,8 +117,15 @@ def test_validate_accepts_json_string_result():
     result = json.dumps(
         {
             "success": True,
+            "schemaVersion": 5,
+            "detailSheetName": "US-轨迹明细",
             "sheetName": "US-FBA",
-            "columns": {"fba": "A", "route": "I", "completion": "B"},
+            "columns": {
+                "fba": "A",
+                "carrier": "C",
+                "route": "I",
+                "completion": "B",
+            },
         }
     )
     client = AirScriptClient(config(), session=FakeSession([FakeResponse(body=finished(result))]))
@@ -114,7 +139,10 @@ def test_pending_fbas_are_read_in_pages_and_deduplicated():
                 body=finished(
                     {
                         "success": True,
-                        "fbas": ["FBA11111", "FBA22222"],
+                        "fbas": [
+                            {"fba": "FBA11111", "carrier": "安达物流"},
+                            {"fba": "FBA22222", "carrier": "超鸿"},
+                        ],
                         "hasMore": True,
                         "nextOffset": 2,
                     }
@@ -124,7 +152,10 @@ def test_pending_fbas_are_read_in_pages_and_deduplicated():
                 body=finished(
                     {
                         "success": True,
-                        "fbas": ["FBA22222", "FBA33333"],
+                        "fbas": [
+                            {"fba": "FBA22222", "carrier": "超鸿"},
+                            {"fba": "FBA33333", "carrier": "易通美森"},
+                        ],
                         "hasMore": False,
                         "nextOffset": 4,
                     }
@@ -132,8 +163,13 @@ def test_pending_fbas_are_read_in_pages_and_deduplicated():
             ),
         ]
     )
-    values = AirScriptClient(config(), session=session).list_pending_fbas(page_size=2)
-    assert values == ["FBA11111", "FBA22222", "FBA33333"]
+    client = AirScriptClient(config(), session=session)
+    values = client.list_pending_tracking_items(page_size=2)
+    assert [(item.fba, item.carrier) for item in values] == [
+        ("FBA11111", "安达物流"),
+        ("FBA22222", "超鸿"),
+        ("FBA33333", "易通美森"),
+    ]
     argv = [call[1]["json"]["Context"]["argv"] for call in session.calls]
     assert [item["action"] for item in argv] == ["list_pending", "list_pending"]
     assert [item["offset"] for item in argv] == [0, 2]
@@ -207,6 +243,125 @@ def test_sync_total_is_unlimited_and_webhook_calls_are_split_to_fifty():
         for call in session.calls
     )
     assert len(summary.updated) == 51
+
+
+def test_rich_sync_sends_snapshot_and_deduplicated_event_payload():
+    session = FakeSession(
+        [
+            FakeResponse(
+                body=finished(
+                    {
+                        "success": True,
+                        "updated": ["FBA11111"],
+                        "unchanged": [],
+                        "notInSheet": [],
+                        "duplicateRows": [],
+                        "failures": [],
+                        "conflicts": ["FBA11111：到港"],
+                        "eventsAdded": 1,
+                        "eventsUpdated": 2,
+                        "eventsUnchanged": 3,
+                    }
+                )
+            )
+        ]
+    )
+    result = TrackingResult(
+        fba="FBA11111",
+        status=QueryStatus.SUCCESS,
+        carrier="安达",
+        latest_time="2026-07-20 10:00",
+        latest_event="已到港",
+        snapshot=TrackingSnapshot(
+            current_phase="干线运输",
+            current_node="实际到达",
+            actual_arrival="2026-07-20",
+        ),
+        events=(
+            TrackingEvent(
+                event_id="event-1",
+                fba="FBA11111",
+                carrier="安达",
+                event_time="2026-07-20 10:00",
+                phase="干线运输",
+                node="实际到达",
+                event_type="实际",
+                content="已到港",
+            ),
+        ),
+    )
+    client = AirScriptClient(config(), session=session)
+    summary = client.sync_tracking_results([result])
+
+    argv = session.calls[0][1]["json"]["Context"]["argv"]
+    assert argv["action"] == "sync_tracking"
+    assert argv["items"][0]["main"]["actual_arrival"] == "2026-07-20"
+    assert argv["items"][0]["main"]["route"] == "2026-07-20 10:00 已到港"
+    assert argv["items"][0]["events"][0]["event_id"] == "event-1"
+    assert summary.conflicts == ["FBA11111：到港"]
+    assert summary.events_added == 1
+    assert summary.events_updated == 2
+    assert summary.events_unchanged == 3
+
+
+def test_rich_sync_batches_are_kept_small():
+    count = AIRSCRIPT_RICH_WRITE_BATCH_SIZE + 1
+    responses = [
+        FakeResponse(
+            body=finished(
+                {
+                    "success": True,
+                    "updated": [],
+                    "unchanged": [],
+                    "notInSheet": [],
+                    "duplicateRows": [],
+                    "failures": [],
+                }
+            )
+        )
+        for _ in range(2)
+    ]
+    session = FakeSession(responses)
+    values = [
+        TrackingResult(
+            fba=f"FBA{index:05d}",
+            status=QueryStatus.SUCCESS,
+            carrier="安达",
+            latest_time="2026-07-20",
+            latest_event="已受理",
+            snapshot=TrackingSnapshot(current_phase="接收"),
+        )
+        for index in range(count)
+    ]
+    AirScriptClient(config(), session=session).sync_tracking_results(values)
+    assert [
+        len(call[1]["json"]["Context"]["argv"]["items"])
+        for call in session.calls
+    ] == [AIRSCRIPT_RICH_WRITE_BATCH_SIZE, 1]
+
+
+def test_old_airscript_schema_is_rejected_with_upgrade_message():
+    body = {
+        "status": "finished",
+        "error": "",
+        "data": {
+            "result": {
+                "success": True,
+                "schemaVersion": 2,
+                "detailSheetName": "物流轨迹明细",
+                "sheetName": "US-FBA",
+                "columns": {
+                    "fba": "A",
+                    "carrier": "B",
+                    "route": "C",
+                    "completion": "D",
+                },
+            }
+        },
+    }
+    client = AirScriptClient(config(), session=FakeSession([FakeResponse(body=body)]))
+    with pytest.raises(ResponseError, match="版本过旧"):
+        client.validate()
 
 
 def test_authentication_and_script_errors_are_classified():

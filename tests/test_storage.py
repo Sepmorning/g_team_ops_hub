@@ -119,3 +119,27 @@ def test_legacy_airscript_config_migrates_to_default_shop(tmp_path):
     assert len(shops) == 1
     assert shops[0].name == "默认店铺"
     assert shops[0].config.api_token == "legacy-token"
+
+
+def test_tracking_detail_cache_is_local_and_isolated_by_profile(tmp_path):
+    path = tmp_path / "app.db"
+    first = ProjectDatabase(path, profile_id="user-one")
+    second = ProjectDatabase(path, profile_id="user-two")
+    payload = {
+        "snapshot": {"latest_time": "2026-07-20", "latest_event": "已到港"},
+        "events": [],
+    }
+    first.save_tracking_cache(
+        "anda",
+        "FBA11111",
+        1,
+        "2026-07-20",
+        "已到港",
+        payload,
+    )
+
+    cached = first.load_tracking_cache("anda", "FBA11111")
+    assert cached is not None
+    assert cached[:3] == (1, "2026-07-20", "已到港")
+    assert cached[3] == payload
+    assert second.load_tracking_cache("anda", "FBA11111") is None

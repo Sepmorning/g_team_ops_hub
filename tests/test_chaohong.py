@@ -71,3 +71,45 @@ def test_large_chaohong_input_is_split_to_keep_request_urls_safe():
     assert len(session.calls) == 3
     assert len(results) == 101
     assert all(item.status == QueryStatus.NOT_FOUND for item in results)
+
+
+def test_detail_timeline_and_pod_are_normalized():
+    session = FakeSession(
+        [
+            FakeResponse(
+                payload={
+                    "code": 0,
+                    "data": {
+                        "tag_no": "FBA11111",
+                        "no": "CH-1",
+                        "trace_second_no": "UPS-1",
+                        "receiver_info": {
+                            "city": "ONTARIO",
+                            "country_cn": "美国",
+                        },
+                        "traces": [
+                            {
+                                "happened_at": "2026-07-01 08:00:00",
+                                "place": "上海",
+                                "detail": "已入中国仓",
+                            },
+                            {
+                                "happened_at": "2026-07-20 08:00:00",
+                                "place": "ONTARIO",
+                                "detail": "已签收",
+                            },
+                        ],
+                        "pod_webimgurl": "http://example.test/pod.jpg",
+                    },
+                }
+            )
+        ]
+    )
+    service = ChaoHongQueryService(
+        ChaoHongClient(session=session, retries=0)
+    )
+    details = service.fetch_tracking_details("FBA11111")
+    assert details.snapshot.pickup_time == "2026-07-01"
+    assert details.snapshot.signed_time == "2026-07-20"
+    assert details.snapshot.pod_status == "已提供"
+    assert any(event.attachment for event in details.events)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import json
 import sqlite3
 import secrets
 from ctypes import wintypes
@@ -157,6 +158,21 @@ class ProjectDatabase:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS tracking_detail_cache (
+                    profile_id TEXT NOT NULL,
+                    carrier TEXT NOT NULL,
+                    fba TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    latest_time TEXT NOT NULL,
+                    latest_event TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (profile_id, carrier, fba)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS shops (
                     id TEXT PRIMARY KEY,
                     profile_id TEXT NOT NULL,
@@ -299,6 +315,68 @@ class ProjectDatabase:
             connection.execute(
                 "DELETE FROM carrier_sessions WHERE profile_id=? AND carrier=?",
                 (self.profile_id, carrier.strip().lower()),
+            )
+
+    def load_tracking_cache(
+        self, carrier: str, fba: str
+    ) -> tuple[int, str, str, dict] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT schema_version, latest_time, latest_event, payload_json
+                FROM tracking_detail_cache
+                WHERE profile_id=? AND carrier=? AND fba=?
+                """,
+                (
+                    self.profile_id,
+                    carrier.strip().lower(),
+                    fba.strip().upper(),
+                ),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(str(row[3]))
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return int(row[0]), str(row[1]), str(row[2]), payload
+
+    def save_tracking_cache(
+        self,
+        carrier: str,
+        fba: str,
+        schema_version: int,
+        latest_time: str,
+        latest_event: str,
+        payload: dict,
+    ) -> None:
+        updated_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO tracking_detail_cache(
+                    profile_id, carrier, fba, schema_version,
+                    latest_time, latest_event, payload_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(profile_id, carrier, fba) DO UPDATE SET
+                    schema_version=excluded.schema_version,
+                    latest_time=excluded.latest_time,
+                    latest_event=excluded.latest_event,
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    self.profile_id,
+                    carrier.strip().lower(),
+                    fba.strip().upper(),
+                    int(schema_version),
+                    str(latest_time or ""),
+                    str(latest_event or ""),
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    updated_at,
+                ),
             )
 
     def list_shops(self) -> list[StoredShop]:

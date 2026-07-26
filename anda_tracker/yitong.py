@@ -17,7 +17,8 @@ from .errors import (
     ResponseError,
     ServerError,
 )
-from .models import QueryStatus, TrackingResult
+from .models import QueryStatus, TrackingDetails, TrackingResult
+from .tracking_details import normalize_tracking_details
 
 
 API_BASE = "http://client.api.etton-log.com"
@@ -27,6 +28,9 @@ CAPTCHA_URL = f"{API_BASE}/api/file/verifyCode"
 LOGIN_URL = f"{API_BASE}/api/orm/apiClientUserService/login"
 USER_INFO_URL = f"{API_BASE}/api/orm/apiClientUserService/getUserInfo"
 ORDER_LIST_URL = f"{API_BASE}/api/orm/apiClientOrderService/getClientOrderList"
+ROUTER_ACTIVITIES_URL = (
+    f"{API_BASE}/api/orm/apiWorkorderRouterService/getWorkorderRouterActivities"
+)
 
 
 @dataclass(frozen=True)
@@ -217,6 +221,29 @@ class YiTongClient:
             raise ResponseError("易通查询响应中缺少订单列表")
         return records
 
+    def get_router_activities(self, order_ids: list[str]) -> dict[str, Any]:
+        if not self.token:
+            raise AuthenticationError("尚未登录易通，请先完成验证码登录")
+        data = self._json_request(
+            "POST",
+            ROUTER_ACTIVITIES_URL,
+            payload={"orderIds": order_ids},
+            token=self.token,
+        )
+        if not self._successful(data):
+            message = self._message(data, "完整路由查询被易通服务拒绝")
+            if any(
+                word in message.lower()
+                for word in ("token", "登录", "认证", "过期", "unauthorized")
+            ):
+                self.token = None
+                raise AuthenticationError("易通登录状态已失效，请重新登录")
+            raise ResponseError(f"易通完整路由查询失败：{message}")
+        values = data.get("list")
+        if not isinstance(values, list):
+            raise ResponseError("易通完整路由响应中缺少时间轴")
+        return data
+
 
 class YiTongQueryService:
     carrier = "易通"
@@ -232,6 +259,7 @@ class YiTongQueryService:
         self.batch_size = max(1, batch_size)
         self.request_interval = max(0.0, request_interval)
         self.sleeper = sleeper
+        self.last_records: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _fba_keys(record: dict[str, Any]) -> set[str]:
@@ -273,6 +301,7 @@ class YiTongQueryService:
                     if record is None:
                         results[fba] = TrackingResult(fba, QueryStatus.NOT_FOUND, carrier="易通")
                     else:
+                        self.last_records[fba] = record
                         results[fba] = TrackingResult(
                             fba=fba,
                             status=QueryStatus.SUCCESS,
@@ -297,3 +326,35 @@ class YiTongQueryService:
             if offset + self.batch_size < len(fbas) and self.request_interval:
                 self.sleeper(self.request_interval)
         return [results[fba] for fba in fbas]
+
+    def fetch_tracking_details(self, fba: str) -> TrackingDetails:
+        record = self.last_records.get(fba)
+        if record is None:
+            records = self.client.query_batch([fba])
+            record = next(
+                (
+                    item
+                    for item in records
+                    if isinstance(item, dict) and fba in self._fba_keys(item)
+                ),
+                None,
+            )
+            if record is None:
+                raise ValueError("易通订单详情不存在")
+            self.last_records[fba] = record
+        order_id = str(record.get("orderId") or "").strip()
+        if not order_id:
+            raise ValueError("易通订单缺少路由详情编号")
+        detail = self.client.get_router_activities([order_id])
+        raw_events = [
+            item for item in detail.get("list", []) if isinstance(item, dict)
+        ]
+        return normalize_tracking_details(
+            fba=fba,
+            carrier="易通",
+            raw_events=raw_events,
+            carrier_order_no=str(record.get("waybillNo") or order_id),
+            structured={
+                "pickup_time": record.get("inboundTime"),
+            },
+        )

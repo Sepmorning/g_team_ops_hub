@@ -22,7 +22,9 @@ from ..parser import parse_fba_input
 from ..storage import ProjectDatabase, protect_secret, unprotect_secret
 from .services import (
     CaptchaRegistry,
+    CarrierConnectionStatus,
     QueryCoordinator,
+    carrier_key_from_sheet,
     result_dict,
     summary_dict,
 )
@@ -332,7 +334,6 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 active="carriers",
                 anda_username=database.credential_username("anda") or "",
                 yitong_username=database.credential_username("yitong") or "",
-                yitong_logged_in=bool(database.load_session_token("yitong")),
             ),
         )
 
@@ -430,9 +431,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     async def carrier_status_api(request: Request):
         account = require_api_user(request)
         _check_csrf(request, request.headers.get("X-CSRF-Token"))
-        live = request.query_params.get("live") == "1"
         statuses = await asyncio.to_thread(
-            coordinator.validate_all if live else coordinator.configured_status,
+            coordinator.configured_status,
             account.id,
         )
         return {
@@ -442,10 +442,66 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "carrier": item.carrier,
                     "connected": item.connected,
                     "message": item.message,
+                    "checked": item.checked,
                 }
                 for item in statuses
             ],
         }
+
+    @app.post("/api/carriers/validation")
+    async def validate_carriers_api(request: Request):
+        """执行有网络副作用的货代登录与连接验证。"""
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        statuses = await asyncio.to_thread(
+            coordinator.validate_all,
+            account.id,
+        )
+        return {
+            "ok": True,
+            "statuses": [
+                {
+                    "carrier": item.carrier,
+                    "connected": item.connected,
+                    "message": item.message,
+                    "checked": item.checked,
+                }
+                for item in statuses
+            ],
+        }
+
+    @app.get("/api/carriers/credentials")
+    async def carrier_credentials_api(request: Request):
+        """只向当前登录用户返回自己的已保存凭据，且禁止浏览器缓存。"""
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        try:
+            anda = database.load_credentials("anda")
+            yitong = database.load_credentials("yitong")
+        except ConfigurationError as exc:
+            return _json_error(exc.user_message)
+        return JSONResponse(
+            {
+                "ok": True,
+                "credentials": {
+                    "anda": (
+                        {"username": anda.username, "password": anda.password}
+                        if anda
+                        else None
+                    ),
+                    "yitong": (
+                        {"username": yitong.username, "password": yitong.password}
+                        if yitong
+                        else None
+                    ),
+                },
+            },
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
 
     @app.post("/api/carriers/anda")
     async def save_anda(request: Request):
@@ -459,6 +515,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             client = AndaClient(retries=coordinator.settings.retries)
             await asyncio.to_thread(client.login, username, password)
             database.save_credentials("anda", username, password)
+            coordinator.invalidate_status(account.id, "anda")
+            coordinator.remember_status(
+                account.id,
+                CarrierConnectionStatus("安达", True, "登录成功"),
+            )
         except CarrierError as exc:
             return _json_error(exc.user_message)
         except ConfigurationError as exc:
@@ -474,6 +535,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return _json_error("未知配置类型", 404)
         database.delete_credentials(kind)
         database.delete_session_token(kind)
+        coordinator.invalidate_status(account.id, kind)
         return {"ok": True, "message": "配置已删除"}
 
     @app.post("/api/carriers/yitong/captcha-challenges")
@@ -518,6 +580,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
             database.save_credentials("yitong", username, password)
             database.save_session_token("yitong", token)
+            coordinator.invalidate_status(account.id, "yitong")
+            coordinator.remember_status(
+                account.id,
+                CarrierConnectionStatus("易通", True, "登录有效"),
+            )
         except (CarrierError, ConfigurationError) as exc:
             return _json_error(exc.user_message)
         return {"ok": True, "message": "易通账号已保存并登录成功"}
@@ -552,7 +619,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "shop_id": shop.id,
             "message": (
                 f"店铺已保存；{binding.sheet_name}的FBA列{binding.fba_column}，"
-                f"是否完成列{binding.completion_column}，路由列{binding.route_column}"
+                f"货代列{binding.carrier_column}，是否完成列{binding.completion_column}，"
+                f"路由列{binding.route_column}"
             ),
         }
 
@@ -586,8 +654,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return {
             "ok": True,
             "message": (
-                f"已连接{binding.sheet_name}；FBA列{binding.fba_column}，"
-                f"是否完成列{binding.completion_column}，路由列{binding.route_column}"
+                f"已连接{binding.sheet_name}和{binding.detail_sheet_name}；"
+                f"主表已按名称识别{len(binding.columns)}个标准字段，"
+                f"FBA列{binding.fba_column}，货代列{binding.carrier_column}，"
+                f"路由列{binding.route_column}"
             ),
         }
 
@@ -600,12 +670,40 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if shop is None:
             return _json_error("店铺不存在或不属于当前用户", 404)
 
-        statuses = await asyncio.to_thread(coordinator.validate_all, account.id)
+        client = AirScriptClient(shop.config, retries=coordinator.settings.retries)
+        try:
+            pending_items = await asyncio.to_thread(
+                client.list_pending_tracking_items
+            )
+        except (CarrierError, ConfigurationError) as exc:
+            return _json_error(exc.user_message)
+        if not pending_items:
+            return {
+                "ok": True,
+                "message": "共享表中没有需要查询的FBA",
+                "carrier_statuses": [],
+                "pending_count": 0,
+                "results": [],
+                "wps": None,
+                "wps_error": "",
+            }
+
+        required_carriers = {
+            key
+            for item in pending_items
+            if (key := carrier_key_from_sheet(item.carrier))
+        }
+        statuses = await asyncio.to_thread(
+            coordinator.validate_required,
+            account.id,
+            required_carriers,
+        )
         status_payload = [
             {
                 "carrier": item.carrier,
                 "connected": item.connected,
                 "message": item.message,
+                "checked": item.checked,
             }
             for item in statuses
         ]
@@ -613,30 +711,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return JSONResponse(
                 {
                     "ok": False,
-                    "message": "存在未连接的货代，自动任务已停止",
+                    "message": "共享表本次使用的货代存在未连接项，自动任务已停止",
                     "carrier_statuses": status_payload,
                 },
                 status_code=409,
             )
 
-        client = AirScriptClient(shop.config, retries=coordinator.settings.retries)
-        try:
-            fbas = await asyncio.to_thread(client.list_pending_fbas)
-        except (CarrierError, ConfigurationError) as exc:
-            return _json_error(exc.user_message)
-        if not fbas:
-            return {
-                "ok": True,
-                "message": "共享表中没有需要查询的FBA",
-                "carrier_statuses": status_payload,
-                "pending_count": 0,
-                "results": [],
-                "wps": None,
-                "wps_error": "",
-            }
         try:
             response = await asyncio.to_thread(
-                coordinator.query, account.id, fbas, shop.config
+                coordinator.query_routed,
+                account.id,
+                pending_items,
+                shop.config,
             )
         except (CarrierError, ConfigurationError) as exc:
             return _json_error(exc.user_message)
@@ -645,9 +731,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return _json_error("自动查询任务发生未预期错误，请稍后重试", 500)
         return {
             "ok": True,
-            "message": f"已读取并查询 {len(fbas)} 个未完成FBA",
+            "message": (
+                f"已按共享表货代列定向查询 {len(pending_items)} 个待更新FBA"
+            ),
             "carrier_statuses": status_payload,
-            "pending_count": len(fbas),
+            "pending_count": len(pending_items),
             "results": [result_dict(item) for item in response.results],
             "wps": summary_dict(response.wps_summary),
             "wps_error": response.wps_error,

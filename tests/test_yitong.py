@@ -128,3 +128,55 @@ def test_network_retry_is_finite():
     else:
         raise AssertionError("expected NetworkError")
     assert len(session.calls) == 2
+
+
+def test_full_router_activities_are_normalized_after_list_query():
+    session = FakeSession(
+        request_outcomes=[
+            FakeResponse(
+                {
+                    "code": 2000,
+                    "list": [
+                        {
+                            "fbaNoList": '["FBA11111"]',
+                            "orderId": "ORDER-1",
+                            "waybillNo": "YT-1",
+                            "routerTime": "2026-07-20 08:00:00",
+                            "routerInformation": "已到港",
+                            "customerChannel": "美森限时达",
+                        }
+                    ],
+                }
+            ),
+            FakeResponse(
+                {
+                    "code": 2000,
+                    "list": [
+                        {
+                            "timestamp": "2026-06-01 08:00:00",
+                            "content": "进仓",
+                        },
+                        {
+                            "timestamp": "2026-06-05 08:00:00",
+                            "content": "已开船，ETA：2026-07-20",
+                        },
+                        {
+                            "timestamp": "2026-07-20 08:00:00",
+                            "content": "到港",
+                        },
+                    ],
+                    "domain": {"fbaWhCode": "ONT8"},
+                }
+            ),
+        ]
+    )
+    client = YiTongClient(session=session, retries=0)
+    client.token = "token"
+    service = YiTongQueryService(client, request_interval=0)
+    service.query_many(["FBA11111"])
+    details = service.fetch_tracking_details("FBA11111")
+
+    assert session.calls[1][2]["json"] == {"orderIds": ["ORDER-1"]}
+    assert details.snapshot.pickup_time == "2026-06-01"
+    assert details.snapshot.actual_departure == "2026-06-05"
+    assert details.snapshot.actual_arrival == "2026-07-20"

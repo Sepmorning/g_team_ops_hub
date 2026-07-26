@@ -78,7 +78,10 @@ class CombinedQueryService:
         result_map = {item.fba: item for item in returned if item.fba in fbas}
         for fba in fbas:
             if fba not in result_map:
-                logger.error("carrier_query_missing_result carrier=%s fba=%s", carrier, fba)
+                logger.error(
+                    "carrier_query_missing_result carrier=%s",
+                    carrier,
+                )
                 result_map[fba] = TrackingResult(
                     fba=fba,
                     status=QueryStatus.FAILED,

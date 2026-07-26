@@ -8,11 +8,18 @@ from urllib.parse import quote
 import requests
 
 from .errors import CarrierError, NetworkError, RateLimitError, ResponseError, ServerError
-from .models import QueryStatus, TrackingResult
+from .models import QueryStatus, TrackingDetails, TrackingResult
+from .tracking_details import normalize_tracking_details
 
 
 CH_BATCH_URL = "http://8.210.173.142:3000/api/traces/batch/"
+CH_DETAIL_URL = "http://8.210.173.142:3000/api/traces/"
 CH_QUERY_BATCH_SIZE = 50
+CH_HEADERS = {
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Referer": "http://8.210.173.142:8080/track.html",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+}
 
 
 class ChaoHongClient:
@@ -32,19 +39,13 @@ class ChaoHongClient:
         self.backoff_seconds = max(0.0, backoff_seconds)
         self.sleeper = sleeper
 
-    def query_batch(self, fbas: list[str]) -> list[dict[str, Any]]:
-        encoded = quote(json.dumps(fbas, ensure_ascii=False, separators=(",", ":")), safe="")
-        url = CH_BATCH_URL + encoded
+    def _get_json(self, url: str) -> dict[str, Any]:
         last_error: CarrierError | None = None
         for attempt in range(self.retries + 1):
             try:
                 response = self.session.get(
                     url,
-                    headers={
-                        "Accept": "application/json, text/javascript, */*; q=0.01",
-                        "Referer": "http://8.210.173.142:8080/track.html",
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                    },
+                    headers=CH_HEADERS,
                     timeout=self.timeout,
                 )
                 if response.status_code == 429:
@@ -59,15 +60,7 @@ class ChaoHongClient:
                     raise ResponseError("超鸿接口返回了无法解析的数据") from exc
                 if not isinstance(data, dict):
                     raise ResponseError("超鸿接口响应格式不符合预期")
-                if data.get("code") == 101:
-                    return []
-                if data.get("code") != 0:
-                    message = str(data.get("message") or "查询请求被超鸿服务拒绝")
-                    raise ResponseError(f"超鸿查询失败：{message[:160]}")
-                records = data.get("data")
-                if not isinstance(records, list):
-                    raise ResponseError("超鸿查询响应中缺少物流列表")
-                return records
+                return data
             except (requests.Timeout, requests.ConnectionError) as exc:
                 last_error = NetworkError("连接超鸿服务失败或请求超时，请检查网络")
                 last_error.__cause__ = exc
@@ -79,6 +72,29 @@ class ChaoHongClient:
             assert last_error is not None
             raise last_error
         raise NetworkError("超鸿请求未完成")
+
+    def query_batch(self, fbas: list[str]) -> list[dict[str, Any]]:
+        encoded = quote(
+            json.dumps(fbas, ensure_ascii=False, separators=(",", ":")),
+            safe="",
+        )
+        data = self._get_json(CH_BATCH_URL + encoded)
+        if data.get("code") == 101:
+            return []
+        if data.get("code") != 0:
+            message = str(data.get("message") or "查询请求被超鸿服务拒绝")
+            raise ResponseError(f"超鸿查询失败：{message[:160]}")
+        records = data.get("data")
+        if not isinstance(records, list):
+            raise ResponseError("超鸿查询响应中缺少物流列表")
+        return records
+
+    def get_detail(self, fba: str) -> dict[str, Any]:
+        data = self._get_json(CH_DETAIL_URL + quote(fba.strip(), safe=""))
+        if data.get("code") != 0 or not isinstance(data.get("data"), dict):
+            message = str(data.get("message") or "超鸿没有返回完整轨迹")
+            raise ResponseError(f"超鸿完整轨迹查询失败：{message[:160]}")
+        return data["data"]
 
 
 class ChaoHongQueryService:
@@ -95,6 +111,7 @@ class ChaoHongQueryService:
         self.batch_size = max(1, min(CH_QUERY_BATCH_SIZE, batch_size))
         self.request_interval = max(0.0, request_interval)
         self.sleeper = sleeper
+        self.last_records: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _record_keys(record: dict[str, Any]) -> set[str]:
@@ -125,6 +142,7 @@ class ChaoHongQueryService:
                             fba=fba, status=QueryStatus.NOT_FOUND, carrier="超鸿"
                         )
                         continue
+                    self.last_records[fba] = record
                     place = str(record.get("place") or "").strip()
                     detail = str(
                         record.get("detail") or record.get("status_name") or ""
@@ -152,3 +170,43 @@ class ChaoHongQueryService:
             if offset + self.batch_size < len(fbas) and self.request_interval:
                 self.sleeper(self.request_interval)
         return [results[fba] for fba in fbas]
+
+    def fetch_tracking_details(self, fba: str) -> TrackingDetails:
+        detail = self.client.get_detail(fba)
+        traces = detail.get("traces")
+        raw_events = [
+            dict(item) for item in traces if isinstance(item, dict)
+        ] if isinstance(traces, list) else []
+        pod_urls = [
+            str(detail.get(field) or "").strip()
+            for field in ("pod_webimgurl", "pod_webimgurl2")
+            if str(detail.get(field) or "").strip()
+        ]
+        if pod_urls:
+            attached = False
+            for item in raw_events:
+                if "POD" in str(item.get("detail") or "").upper():
+                    item["attachment"] = "；".join(pod_urls)
+                    attached = True
+                    break
+            if not attached:
+                raw_events.append(
+                    {
+                        "happened_at": detail.get("trace_at")
+                        or detail.get("updated_at")
+                        or "",
+                        "detail": "POD已提供",
+                        "attachment": "；".join(pod_urls),
+                    }
+                )
+        return normalize_tracking_details(
+            fba=fba,
+            carrier="超鸿",
+            raw_events=raw_events,
+            carrier_order_no=str(
+                detail.get("no") or detail.get("tag_no") or fba
+            ),
+            structured={
+                "pickup_time": detail.get("start_at"),
+            },
+        )

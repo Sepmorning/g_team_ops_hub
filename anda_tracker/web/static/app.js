@@ -24,12 +24,13 @@ function showStatus(element, message, kind = 'info') {
 
 function buttonBusy(button, busy, text = '处理中…') {
   if (busy) {
-    button.dataset.original = button.innerHTML;
+    if (!button.disabled) button.dataset.original = button.innerHTML;
     button.innerHTML = `<span class="spinner"></span>${text}`;
     button.disabled = true;
   } else {
     button.innerHTML = button.dataset.original || button.innerHTML;
     button.disabled = false;
+    delete button.dataset.original;
   }
 }
 

@@ -5,6 +5,7 @@ import secrets
 import string
 import time
 from typing import Any, Callable
+from urllib.parse import quote
 
 import requests
 from Crypto.Cipher import AES
@@ -22,6 +23,7 @@ from .errors import (
 
 LOGIN_URL = "https://fms.yunwuyun.com/api/csm/unicsmuserinfo/login"
 QUERY_URL = "https://fms.yunwuyun.com/api/oms/fbxOrder/queryFbxOrderList"
+TRACE_URL = "https://fms.yunwuyun.com/api/fms/bizTrace/getTraceList/"
 ORIGIN = "https://oms.yunwuyun.com"
 
 
@@ -54,11 +56,30 @@ class AndaClient:
         self.sleeper = sleeper
         self.token: str | None = None
 
-    def _post(self, url: str, *, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+    def _request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         last_error: CarrierError | None = None
         for attempt in range(self.retries + 1):
             try:
-                response = self.session.post(url, json=payload, headers=headers, timeout=self.timeout)
+                if method == "POST":
+                    request = self.session.post
+                elif method == "GET":
+                    request = self.session.get
+                else:
+                    raise ValueError(f"不支持的HTTP方法：{method}")
+                kwargs: dict[str, Any] = {
+                    "headers": headers,
+                    "timeout": self.timeout,
+                }
+                if payload is not None:
+                    kwargs["json"] = payload
+                response = request(url, **kwargs)
                 if response.status_code in (401, 403):
                     raise AuthenticationError("登录凭据无效或会话已过期")
                 if response.status_code == 429:
@@ -86,6 +107,25 @@ class AndaClient:
             assert last_error is not None
             raise last_error
         raise NetworkError("请求未完成")
+
+    def _post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._request_json(
+            "POST",
+            url,
+            headers=headers,
+            payload=payload,
+        )
+
+    def _get(
+        self, url: str, *, headers: dict[str, str]
+    ) -> dict[str, Any]:
+        return self._request_json("GET", url, headers=headers)
 
     def login(self, username: str, password: str) -> None:
         encrypted = encrypt_login_password(password)
@@ -154,3 +194,28 @@ class AndaClient:
         if not isinstance(records, list):
             raise ResponseError("安达查询响应中缺少订单列表")
         return records
+
+    def get_trace_list(self, trace_no: str) -> list[dict[str, Any]]:
+        if not self.token:
+            raise AuthenticationError("尚未登录安达")
+        value = trace_no.strip()
+        if not value:
+            raise ResponseError("安达订单缺少物流轨迹编号")
+        data = self._get(
+            TRACE_URL + quote(value, safe=""),
+            headers={
+                "Token": self.token,
+                "Origin": ORIGIN,
+                "Accept": "application/json, text/plain, */*",
+            },
+        )
+        if not data.get("success"):
+            message = str(data.get("message") or "安达完整轨迹查询失败")
+            if any(word in message.lower() for word in ("token", "登录", "认证", "过期")):
+                self.token = None
+                raise AuthenticationError("安达登录状态已失效，请重新登录")
+            raise ResponseError(f"安达完整轨迹查询失败：{message[:160]}")
+        result = data.get("result")
+        if not isinstance(result, list):
+            raise ResponseError("安达完整轨迹响应中缺少轨迹列表")
+        return [item for item in result if isinstance(item, dict)]
