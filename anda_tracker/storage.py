@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import json
+import re
 import sqlite3
 import secrets
 from ctypes import wintypes
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from .airscript import AirScriptConfig
 from .errors import ConfigurationError
+from .sites import infer_country_code, normalize_country_code
 
 
 SYSTEM_MAX_QUERY_COUNT = 50
@@ -83,6 +85,7 @@ class StoredCredentials:
 class StoredShop:
     id: str
     name: str
+    listing_prefix: str
     config: AirScriptConfig
     created_at: str
     updated_at: str
@@ -102,6 +105,9 @@ class StoredShopCountry:
     shop_id: str
     country_name: str
     sheet_name: str
+    country_code: str
+    fba_sheet_name: str
+    detail_sheet_name: str
     created_at: str
     updated_at: str
 
@@ -217,6 +223,15 @@ class ProjectDatabase:
                 )
                 """
             )
+            shop_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(shops)").fetchall()
+            }
+            if "listing_prefix" not in shop_columns:
+                connection.execute(
+                    "ALTER TABLE shops ADD COLUMN listing_prefix "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS shop_countries (
@@ -232,6 +247,22 @@ class ProjectDatabase:
                 )
                 """
             )
+            country_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(shop_countries)"
+                ).fetchall()
+            }
+            for column_name in (
+                "country_code",
+                "fba_sheet_name",
+                "detail_sheet_name",
+            ):
+                if column_name not in country_columns:
+                    connection.execute(
+                        f"ALTER TABLE shop_countries ADD COLUMN {column_name} "
+                        "TEXT NOT NULL DEFAULT ''"
+                    )
             connection.execute(
                 "INSERT OR IGNORE INTO system_settings(setting_key, setting_value) VALUES('max_query_count', ?)",
                 (str(SYSTEM_MAX_QUERY_COUNT),),
@@ -429,7 +460,7 @@ class ProjectDatabase:
             rows = connection.execute(
                 """
                 SELECT id, name, share_url, webhook_url, api_token_ciphertext,
-                       sheet_name, created_at, updated_at
+                       sheet_name, listing_prefix, created_at, updated_at
                 FROM shops WHERE profile_id=? ORDER BY created_at, name
                 """,
                 (self.profile_id,),
@@ -441,7 +472,7 @@ class ProjectDatabase:
             row = connection.execute(
                 """
                 SELECT id, name, share_url, webhook_url, api_token_ciphertext,
-                       sheet_name, created_at, updated_at
+                       sheet_name, listing_prefix, created_at, updated_at
                 FROM shops WHERE profile_id=? AND id=?
                 """,
                 (self.profile_id, shop_id),
@@ -450,18 +481,45 @@ class ProjectDatabase:
 
     @staticmethod
     def _shop_from_row(row) -> StoredShop:
+        encrypted_token = str(row[4] or "")
         return StoredShop(
             id=str(row[0]),
             name=str(row[1]),
+            listing_prefix=str(row[6] or ""),
             config=AirScriptConfig(
                 share_url=str(row[2]),
                 webhook_url=str(row[3]),
-                api_token=unprotect_secret(str(row[4])),
+                api_token=(
+                    unprotect_secret(encrypted_token) if encrypted_token else ""
+                ),
                 sheet_name=str(row[5]),
             ),
-            created_at=str(row[6]),
-            updated_at=str(row[7]),
+            created_at=str(row[7]),
+            updated_at=str(row[8]),
         )
+
+    def save_shop_listing_prefix(
+        self, shop_id: str, listing_prefix: str
+    ) -> StoredShop:
+        listing_prefix = listing_prefix.strip()
+        if not listing_prefix or len(listing_prefix) > 60:
+            raise ConfigurationError(
+                "Listing子表前缀不能为空且不能超过60位"
+            )
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE shops SET listing_prefix=?, updated_at=?
+                WHERE id=? AND profile_id=?
+                """,
+                (listing_prefix, timestamp, shop_id, self.profile_id),
+            )
+        if updated.rowcount != 1:
+            raise ConfigurationError("店铺不存在或不属于当前用户")
+        shop = self.get_shop(shop_id)
+        assert shop is not None
+        return shop
 
     def save_shop(
         self, name: str, config: AirScriptConfig, shop_id: str | None = None
@@ -472,10 +530,12 @@ class ProjectDatabase:
         share_url = config.share_url.strip()
         webhook_url = config.webhook_url.strip()
         sheet_name = config.sheet_name.strip()
-        if not share_url or not webhook_url or not config.api_token or not sheet_name:
-            raise ConfigurationError("店铺名称、共享表链接、Webhook和脚本令牌不能为空")
+        if not share_url or not sheet_name:
+            raise ConfigurationError("店铺名称和共享表链接不能为空")
+        if bool(webhook_url) != bool(config.api_token):
+            raise ConfigurationError("物流脚本Webhook和令牌必须同时填写")
         timestamp = datetime.now(timezone.utc).isoformat()
-        encrypted_token = protect_secret(config.api_token)
+        encrypted_token = protect_secret(config.api_token) if config.api_token else ""
         try:
             with self._connect() as connection:
                 if shop_id:
@@ -603,7 +663,9 @@ class ProjectDatabase:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, shop_id, country_name, sheet_name, created_at, updated_at
+                SELECT id, shop_id, country_name, sheet_name,
+                       country_code, fba_sheet_name, detail_sheet_name,
+                       created_at, updated_at
                 FROM shop_countries
                 WHERE profile_id=? AND shop_id=?
                 ORDER BY created_at, country_name
@@ -616,8 +678,28 @@ class ProjectDatabase:
                 shop_id=str(row[1]),
                 country_name=str(row[2]),
                 sheet_name=str(row[3]),
-                created_at=str(row[4]),
-                updated_at=str(row[5]),
+                country_code=(
+                    normalize_country_code(str(row[4]))
+                    or infer_country_code(str(row[2]))
+                ),
+                fba_sheet_name=(
+                    str(row[5])
+                    or (
+                        "US-FBA"
+                        if infer_country_code(str(row[2])) == "US"
+                        else ""
+                    )
+                ),
+                detail_sheet_name=(
+                    str(row[6])
+                    or (
+                        "US-轨迹明细"
+                        if infer_country_code(str(row[2])) == "US"
+                        else ""
+                    )
+                ),
+                created_at=str(row[7]),
+                updated_at=str(row[8]),
             )
             for row in rows
         ]
@@ -626,7 +708,9 @@ class ProjectDatabase:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, shop_id, country_name, sheet_name, created_at, updated_at
+                SELECT id, shop_id, country_name, sheet_name,
+                       country_code, fba_sheet_name, detail_sheet_name,
+                       created_at, updated_at
                 FROM shop_countries
                 WHERE profile_id=? AND id=?
                 """,
@@ -639,8 +723,28 @@ class ProjectDatabase:
             shop_id=str(row[1]),
             country_name=str(row[2]),
             sheet_name=str(row[3]),
-            created_at=str(row[4]),
-            updated_at=str(row[5]),
+            country_code=(
+                normalize_country_code(str(row[4]))
+                or infer_country_code(str(row[2]))
+            ),
+            fba_sheet_name=(
+                str(row[5])
+                or (
+                    "US-FBA"
+                    if infer_country_code(str(row[2])) == "US"
+                    else ""
+                )
+            ),
+            detail_sheet_name=(
+                str(row[6])
+                or (
+                    "US-轨迹明细"
+                    if infer_country_code(str(row[2])) == "US"
+                    else ""
+                )
+            ),
+            created_at=str(row[7]),
+            updated_at=str(row[8]),
         )
 
     def save_shop_country(
@@ -649,15 +753,28 @@ class ProjectDatabase:
         country_name: str,
         sheet_name: str,
         country_id: str | None = None,
+        *,
+        country_code: str = "",
+        fba_sheet_name: str = "",
+        detail_sheet_name: str = "",
     ) -> StoredShopCountry:
         if self.get_shop(shop_id) is None:
             raise ConfigurationError("店铺不存在或不属于当前用户")
         country_name = country_name.strip()
         sheet_name = sheet_name.strip()
+        country_code = normalize_country_code(country_code) or infer_country_code(
+            country_name
+        )
+        fba_sheet_name = fba_sheet_name.strip()
+        detail_sheet_name = detail_sheet_name.strip()
         if not country_name or len(country_name) > 40:
             raise ConfigurationError("国家名称不能为空且不能超过40位")
         if not sheet_name or len(sheet_name) > 80:
             raise ConfigurationError("Listing子表名称不能为空且不能超过80位")
+        if country_code and not re.fullmatch(r"[A-Z]{2,3}", country_code):
+            raise ConfigurationError("国家代码应为2至3位英文字母")
+        if len(fba_sheet_name) > 80 or len(detail_sheet_name) > 80:
+            raise ConfigurationError("FBA主表和轨迹明细表名称不能超过80位")
         timestamp = datetime.now(timezone.utc).isoformat()
         try:
             with self._connect() as connection:
@@ -665,12 +782,16 @@ class ProjectDatabase:
                     updated = connection.execute(
                         """
                         UPDATE shop_countries
-                        SET country_name=?, sheet_name=?, updated_at=?
+                        SET country_name=?, sheet_name=?, country_code=?,
+                            fba_sheet_name=?, detail_sheet_name=?, updated_at=?
                         WHERE id=? AND profile_id=? AND shop_id=?
                         """,
                         (
                             country_name,
                             sheet_name,
+                            country_code,
+                            fba_sheet_name,
+                            detail_sheet_name,
                             timestamp,
                             country_id,
                             self.profile_id,
@@ -687,8 +808,9 @@ class ProjectDatabase:
                         """
                         INSERT INTO shop_countries(
                             id, profile_id, shop_id, country_name,
-                            sheet_name, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            sheet_name, country_code, fba_sheet_name,
+                            detail_sheet_name, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             country_id,
@@ -696,6 +818,9 @@ class ProjectDatabase:
                             shop_id,
                             country_name,
                             sheet_name,
+                            country_code,
+                            fba_sheet_name,
+                            detail_sheet_name,
                             timestamp,
                             timestamp,
                         ),

@@ -685,6 +685,35 @@ class ListingAirScriptClient:
             columns={str(key): str(value) for key, value in columns.items()},
         )
 
+    def discover_sheets(self) -> list[dict[str, str]]:
+        result = self._execute("discover", [])
+        try:
+            version = int(result.get("schemaVersion") or 0)
+        except (TypeError, ValueError):
+            version = 0
+        if version < 2:
+            raise ResponseError(
+                "WPS中的Listing AirScript不支持自动识别国家；请替换为项目内最新脚本"
+            )
+        sheets = result.get("sheets")
+        if not isinstance(sheets, list):
+            raise ResponseError("Listing AirScript扫描结果缺少子表列表")
+        parsed: list[dict[str, str]] = []
+        for item in sheets:
+            if isinstance(item, str):
+                name = item.strip()
+                sheet_id = ""
+            elif isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                sheet_id = str(item.get("id") or "").strip()
+            else:
+                continue
+            if name:
+                parsed.append({"id": sheet_id, "name": name})
+        if not parsed:
+            raise ResponseError("Listing AirScript没有返回任何可识别子表")
+        return parsed
+
     def sync(
         self, rows: tuple[ListingRow, ...], data_date: str
     ) -> ListingSyncSummary:

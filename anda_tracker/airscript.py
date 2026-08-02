@@ -21,9 +21,10 @@ from .models import QueryStatus, TrackingResult
 
 
 TARGET_SHEET_NAME = "US-FBA"
+DEFAULT_DETAIL_SHEET_NAME = "US-轨迹明细"
 AIRSCRIPT_WRITE_BATCH_SIZE = 50
 AIRSCRIPT_RICH_WRITE_BATCH_SIZE = 10
-REQUIRED_AIRSCRIPT_SCHEMA_VERSION = 5
+REQUIRED_AIRSCRIPT_SCHEMA_VERSION = 8
 
 
 def parse_share_file_id(share_url: str) -> str:
@@ -43,6 +44,7 @@ class AirScriptConfig:
     webhook_url: str
     api_token: str
     sheet_name: str = TARGET_SHEET_NAME
+    detail_sheet_name: str = DEFAULT_DETAIL_SHEET_NAME
 
 
 @dataclass(frozen=True)
@@ -63,15 +65,29 @@ class PendingTrackingItem:
     carrier: str
 
 
+@dataclass(frozen=True)
+class AirScriptCellChange:
+    fba: str
+    row: int
+    address: str
+    field: str
+    header: str
+    old_value: str
+    new_value: str
+
+
 @dataclass
 class AirScriptSyncSummary:
     updated: list[str] = field(default_factory=list)
+    audit_only: list[str] = field(default_factory=list)
     unchanged: list[str] = field(default_factory=list)
     not_in_sheet: list[str] = field(default_factory=list)
     duplicate_rows: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
+    updated_cells: list[AirScriptCellChange] = field(default_factory=list)
+    format_failures: list[str] = field(default_factory=list)
     events_added: int = 0
     events_updated: int = 0
     events_unchanged: int = 0
@@ -79,7 +95,8 @@ class AirScriptSyncSummary:
     @property
     def message(self) -> str:
         parts = [
-            f"更新 {len(self.updated)}",
+            f"业务更新 {len(self.updated)}（{len(self.updated_cells)} 个单元格）",
+            f"仅刷新查询时间 {len(self.audit_only)}",
             f"无变化 {len(self.unchanged)}",
             f"表中未找到 {len(self.not_in_sheet)}",
             f"重复行 {len(self.duplicate_rows)}",
@@ -89,10 +106,12 @@ class AirScriptSyncSummary:
             parts.append(f"失败 {len(self.failures)}")
         if self.conflicts:
             parts.append(f"人工值冲突 {len(self.conflicts)}")
+        if self.format_failures:
+            parts.append(f"格式警告 {len(self.format_failures)}")
         if self.events_added or self.events_updated or self.events_unchanged:
             parts.append(
-                f"明细新增 {self.events_added}，状态更新 {self.events_updated}，"
-                f"已存在 {self.events_unchanged}"
+                f"明细新增 {self.events_added}，实际更新 {self.events_updated}，"
+                f"无变化 {self.events_unchanged}"
             )
         return "，".join(parts)
 
@@ -121,6 +140,35 @@ def _string_list(value: Any) -> list[str]:
     return [str(item) for item in value]
 
 
+def _cell_change_list(value: Any) -> list[AirScriptCellChange]:
+    if not isinstance(value, list):
+        return []
+    changes: list[AirScriptCellChange] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        fba = str(item.get("fba") or "").strip()
+        address = str(item.get("address") or "").strip()
+        if not fba or not address:
+            continue
+        try:
+            row = int(item.get("row") or 0)
+        except (TypeError, ValueError):
+            row = 0
+        changes.append(
+            AirScriptCellChange(
+                fba=fba,
+                row=row,
+                address=address,
+                field=str(item.get("field") or "").strip(),
+                header=str(item.get("header") or "").strip(),
+                old_value=str(item.get("oldValue") or ""),
+                new_value=str(item.get("newValue") or ""),
+            )
+        )
+    return changes
+
+
 class AirScriptClient:
     def __init__(
         self,
@@ -134,8 +182,10 @@ class AirScriptClient:
         validate_webhook_url(config.webhook_url)
         if not config.api_token:
             raise ConfigurationError("AirScript 脚本令牌不能为空")
-        if config.sheet_name.strip() != TARGET_SHEET_NAME:
-            raise ConfigurationError("当前阶段只允许更新 US-FBA 子表")
+        if not config.sheet_name.strip() or len(config.sheet_name.strip()) > 80:
+            raise ConfigurationError("FBA主表名称不能为空且不能超过80位")
+        if not config.detail_sheet_name.strip() or len(config.detail_sheet_name.strip()) > 80:
+            raise ConfigurationError("轨迹明细表名称不能为空且不能超过80位")
         self.config = config
         self.session = session or requests.Session()
         self.timeout = timeout
@@ -150,6 +200,7 @@ class AirScriptClient:
         argv = {
             "action": action,
             "sheet_name": self.config.sheet_name,
+            "detail_sheet_name": self.config.detail_sheet_name,
             "items": items,
         }
         if arguments:
@@ -258,7 +309,8 @@ class AirScriptClient:
             or not carrier_column
         ):
             raise ResponseError(
-                "AirScript 未能识别US-FBA的FBA列、货代列、是否完成列或路由列；"
+                f"AirScript 未能识别{self.config.sheet_name}的FBA列、货代列、"
+                "是否完成列或路由列；"
                 "请更新WPS中的正式AirScript脚本"
             )
         return AirScriptBinding(
@@ -275,6 +327,32 @@ class AirScriptClient:
                 if value is not None
             },
         )
+
+    def discover_sheets(self) -> list[dict[str, str]]:
+        result = self._execute("discover", [])
+        version = self._require_schema(result)
+        if version < 9:
+            raise ResponseError(
+                "WPS中的物流AirScript不支持自动识别国家；请替换为项目内最新脚本"
+            )
+        sheets = result.get("sheets")
+        if not isinstance(sheets, list):
+            raise ResponseError("物流AirScript扫描结果缺少子表列表")
+        parsed: list[dict[str, str]] = []
+        for item in sheets:
+            if isinstance(item, str):
+                name = item.strip()
+                sheet_id = ""
+            elif isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                sheet_id = str(item.get("id") or "").strip()
+            else:
+                continue
+            if name:
+                parsed.append({"id": sheet_id, "name": name})
+        if not parsed:
+            raise ResponseError("物流AirScript没有返回任何可识别子表")
+        return parsed
 
     def list_pending_tracking_items(
         self, page_size: int = 500
@@ -357,11 +435,18 @@ class AirScriptClient:
                     f"此前已处理 {offset} 条。可重新查询安全补写：{exc.user_message}"
                 ) from exc
             summary.updated.extend(_string_list(result.get("updated")))
+            summary.audit_only.extend(_string_list(result.get("auditOnly")))
             summary.unchanged.extend(_string_list(result.get("unchanged")))
             summary.not_in_sheet.extend(_string_list(result.get("notInSheet")))
             summary.duplicate_rows.extend(_string_list(result.get("duplicateRows")))
             summary.failures.extend(_string_list(result.get("failures")))
             summary.conflicts.extend(_string_list(result.get("conflicts")))
+            summary.updated_cells.extend(
+                _cell_change_list(result.get("updatedCells"))
+            )
+            summary.format_failures.extend(
+                _string_list(result.get("formatFailures"))
+            )
             summary.events_added += int(result.get("eventsAdded") or 0)
             summary.events_updated += int(result.get("eventsUpdated") or 0)
             summary.events_unchanged += int(result.get("eventsUnchanged") or 0)

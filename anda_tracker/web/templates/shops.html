@@ -1,20 +1,180 @@
 {% extends "base.html" %}
 {% block title %}我的店铺 · FBA运营工作台{% endblock %}
 {% block content %}
-<header class="page-head"><div><h1>我的店铺</h1><p>一个店铺维护一份共享表；每个账号可以独立管理多个店铺。</p></div><button class="btn primary" onclick="openShop()">添加店铺</button></header>
+<header class="page-head">
+  <div>
+    <h1>我的店铺</h1>
+    <p>一个店铺对应一份共享工作簿；共享表、模块脚本和国家站点都在这里集中配置一次。</p>
+  </div>
+  <button class="btn primary" onclick="openShop()">添加店铺</button>
+</header>
 <div id="shopStatus" class="status"></div>
-{% if shops %}<section class="grid cols-2">
-{% for shop in shops %}<article class="card"><div class="section-head"><div><h2>{{ shop.name }}</h2><span class="muted">US-FBA</span></div><span class="pill">已保存</span></div><p style="word-break:break-all">{{ shop.config.share_url }}</p><div class="actions"><button class="btn primary" onclick="validateShop('{{ shop.id }}',this)">测试连接</button><button class="btn" data-id="{{ shop.id }}" data-name="{{ shop.name|e }}" data-share="{{ shop.config.share_url|e }}" data-webhook="{{ shop.config.webhook_url|e }}" onclick="editShop(this)">编辑</button><button class="btn danger" onclick="deleteShop('{{ shop.id }}')">删除</button></div></article>{% endfor %}
-</section>{% else %}<section class="card" style="text-align:center;padding:60px 24px"><h2>还没有店铺</h2><p>添加店铺并连接AirScript后，物流查询可以选择对应共享表。</p><button class="btn primary" onclick="openShop()">添加第一个店铺</button></section>{% endif %}
-<dialog id="shopDialog"><div class="dialog-body"><div class="section-head"><h2 id="dialogTitle">添加店铺</h2><button class="btn small" onclick="shopDialog.close()">关闭</button></div><input id="shopId" type="hidden"><div class="field"><label>店铺名称</label><input id="shopName" maxlength="60" placeholder="例如：美国一店"></div><div class="field" style="margin-top:12px"><label>共享表链接</label><input id="shopShare" placeholder="https://www.kdocs.cn/l/…"></div><div class="field" style="margin-top:12px"><label>脚本Webhook</label><input id="shopWebhook" placeholder="https://www.kdocs.cn/api/v3/ide/…/sync_task"></div><div class="field" style="margin-top:12px"><label>脚本令牌</label><input id="shopToken" type="password" autocomplete="new-password" placeholder="编辑时留空表示继续使用已保存令牌"></div><button class="btn primary" id="saveShopButton" style="margin-top:18px;width:100%" onclick="saveShop(this)">保存并测试连接</button></div></dialog>
+
+{% if shops %}
+<section class="grid cols-2">
+{% for shop in shops %}
+  <article class="card">
+    <div class="section-head">
+      <div><h2>{{ shop.name }}</h2><span class="muted">共享工作簿</span></div>
+      <span class="pill {{ 'success' if shop.config.webhook_url else '' }}">{{ '物流已配置' if shop.config.webhook_url else '待配置模块' }}</span>
+    </div>
+    <p style="word-break:break-all">{{ shop.config.share_url }}</p>
+    <div class="actions">
+      <button class="btn primary" onclick="openManage('{{ shop.id }}')">配置脚本与站点</button>
+      <button class="btn" data-id="{{ shop.id }}" data-name="{{ shop.name|e }}" data-share="{{ shop.config.share_url|e }}" onclick="editShop(this)">编辑基本信息</button>
+      <button class="btn danger" onclick="deleteShop('{{ shop.id }}')">删除</button>
+    </div>
+  </article>
+{% endfor %}
+</section>
+{% else %}
+<section class="card" style="text-align:center;padding:60px 24px">
+  <h2>还没有店铺</h2>
+  <p>先保存店铺名称和共享表链接，再在同一页面连接脚本并自动识别国家站点。</p>
+  <button class="btn primary" onclick="openShop()">添加第一个店铺</button>
+</section>
+{% endif %}
+
+<dialog id="shopDialog">
+  <div class="dialog-body">
+    <div class="section-head"><h2 id="dialogTitle">添加店铺</h2><button class="btn small" onclick="shopDialog.close()">关闭</button></div>
+    <input id="shopId" type="hidden">
+    <div class="field"><label>店铺名称</label><input id="shopName" maxlength="60" placeholder="例如：纯粹"></div>
+    <div class="field" style="margin-top:12px"><label>共享表链接</label><input id="shopShare" placeholder="https://www.kdocs.cn/l/…"></div>
+    <p class="muted">这里只保存工作簿基本信息。保存后再集中配置物流和Listing脚本。</p>
+    <button class="btn primary" id="saveShopButton" style="margin-top:18px;width:100%" onclick="saveShop(this)">保存店铺</button>
+  </div>
+</dialog>
+
+<dialog id="manageDialog" style="width:min(1050px,96vw)">
+  <div class="dialog-body" style="width:auto;max-width:none">
+    <div class="section-head">
+      <div><h2 id="manageTitle">配置店铺</h2><p id="manageShare" class="muted" style="margin:5px 0 0;word-break:break-all"></p></div>
+      <button class="btn small" onclick="manageDialog.close()">关闭</button>
+    </div>
+    <input id="manageShopId" type="hidden">
+    <div id="manageStatus" class="status"></div>
+    <div class="actions" style="margin-bottom:14px">
+      <span class="muted">已确认Listing子表前缀：<strong id="managePrefix">尚未确认</strong></span>
+      <button class="btn small" onclick="scanSites(this,true)">重新识别前缀</button>
+    </div>
+
+    <section class="grid cols-2">
+      <article class="card" style="box-shadow:none">
+        <div class="section-head"><h3>FBA物流更新脚本</h3><span id="trackingPill" class="pill">未配置</span></div>
+        <div class="field"><label>Webhook</label><input id="trackingWebhook" placeholder="https://www.kdocs.cn/api/v3/ide/…/sync_task"></div>
+        <div class="field" style="margin-top:10px"><label>脚本令牌</label><input id="trackingToken" type="password" autocomplete="new-password" placeholder="已保存时留空即可"></div>
+        <button class="btn primary" style="margin-top:12px" onclick="saveModuleConnection('tracking',this)">保存并连接物流脚本</button>
+      </article>
+      <article class="card" style="box-shadow:none">
+        <div class="section-head"><h3>Listing库存销售脚本</h3><span id="listingPill" class="pill">未配置</span></div>
+        <div class="field"><label>Webhook</label><input id="listingWebhook" placeholder="https://www.kdocs.cn/api/v3/ide/…/sync_task"></div>
+        <div class="field" style="margin-top:10px"><label>脚本令牌</label><input id="listingToken" type="password" autocomplete="new-password" placeholder="已保存时留空即可"></div>
+        <button class="btn primary" style="margin-top:12px" onclick="saveModuleConnection('listing',this)">保存并连接Listing脚本</button>
+      </article>
+    </section>
+
+    <div class="divider"></div>
+    <div class="section-head">
+      <div><h3>国家站点与子表</h3><p class="muted" style="margin:5px 0 0">连接任一新版脚本后可扫描；明确匹配会自动保存，疑似拼写错误只提示不写入。</p></div>
+      <div class="actions"><button class="btn primary" onclick="scanSites(this)">扫描共享表</button><button class="btn" onclick="openSiteDialog()">手工添加</button></div>
+    </div>
+    <div id="siteList" class="table-wrap"></div>
+  </div>
+</dialog>
+
+<dialog id="siteDialog">
+  <div class="dialog-body">
+    <div class="section-head"><h2 id="siteDialogTitle">添加国家站点</h2><button class="btn small" onclick="siteDialog.close()">关闭</button></div>
+    <input id="siteId" type="hidden">
+    <div class="form-grid">
+      <div class="field"><label>国家名称</label><input id="siteCountryName" maxlength="40" placeholder="美国"></div>
+      <div class="field"><label>国家代码</label><input id="siteCountryCode" maxlength="3" placeholder="US"></div>
+      <div class="field full"><label>Listing子表</label><input id="siteListingSheet" maxlength="80" placeholder="纯粹-美国"></div>
+      <div class="field"><label>FBA主表</label><input id="siteFbaSheet" maxlength="80" placeholder="US-FBA"></div>
+      <div class="field"><label>轨迹明细表</label><input id="siteDetailSheet" maxlength="80" placeholder="US-轨迹明细"></div>
+    </div>
+    <button class="btn primary" style="margin-top:16px;width:100%" onclick="saveSite(this)">保存站点映射</button>
+  </div>
+</dialog>
 {% endblock %}
+
 {% block scripts %}
 <script>
-const shopStatus=document.querySelector('#shopStatus');
-function openShop(){shopId.value='';shopName.value='';shopShare.value='';shopWebhook.value='';shopToken.value='';dialogTitle.textContent='添加店铺';shopDialog.showModal()}
-function editShop(btn){shopId.value=btn.dataset.id;shopName.value=btn.dataset.name;shopShare.value=btn.dataset.share;shopWebhook.value=btn.dataset.webhook;shopToken.value='';dialogTitle.textContent='编辑店铺';shopDialog.showModal()}
-async function saveShop(btn){FBA.buttonBusy(btn,true,'连接并保存…');try{const d=await FBA.api('/api/shops',{method:'POST',body:{id:shopId.value,name:shopName.value,share_url:shopShare.value,webhook_url:shopWebhook.value,api_token:shopToken.value}});shopDialog.close();FBA.showStatus(shopStatus,d.message,'ok');setTimeout(()=>location.reload(),600)}catch(e){FBA.showStatus(shopStatus,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
-async function validateShop(id,btn){FBA.buttonBusy(btn,true,'测试中…');try{const d=await FBA.api(`/api/shops/${id}/validation`,{method:'POST'});FBA.showStatus(shopStatus,d.message,'ok')}catch(e){FBA.showStatus(shopStatus,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
-async function deleteShop(id){if(!confirm('确定删除这个店铺配置？不会删除WPS中的表格内容。'))return;try{const d=await FBA.api(`/api/shops/${id}`,{method:'DELETE'});FBA.showStatus(shopStatus,d.message,'ok');setTimeout(()=>location.reload(),400)}catch(e){FBA.showStatus(shopStatus,e.message,'error')}}
+const shopStatus=document.querySelector('#shopStatus'),manageStatus=document.querySelector('#manageStatus');
+let currentShopConfig=null;
+function openShop(){shopId.value='';shopName.value='';shopShare.value='';dialogTitle.textContent='添加店铺';shopDialog.showModal()}
+function editShop(btn){shopId.value=btn.dataset.id;shopName.value=btn.dataset.name;shopShare.value=btn.dataset.share;dialogTitle.textContent='编辑店铺基本信息';shopDialog.showModal()}
+async function saveShop(btn){FBA.buttonBusy(btn,true,'保存中…');try{const d=await FBA.api('/api/shops',{method:'POST',body:{id:shopId.value,name:shopName.value,share_url:shopShare.value}});shopDialog.close();FBA.showStatus(shopStatus,d.message,'ok');setTimeout(()=>location.reload(),650)}catch(e){FBA.showStatus(shopStatus,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
+async function deleteShop(id){if(!confirm('确定删除这个店铺及其本地脚本和站点配置？不会删除WPS中的表格内容。'))return;try{const d=await FBA.api(`/api/shops/${id}`,{method:'DELETE'});FBA.showStatus(shopStatus,d.message,'ok');setTimeout(()=>location.reload(),400)}catch(e){FBA.showStatus(shopStatus,e.message,'error')}}
+
+async function openManage(id){manageShopId.value=id;manageDialog.showModal();await loadManageConfig()}
+async function loadManageConfig(){
+  FBA.showStatus(manageStatus,'正在读取配置…','info');
+  try{
+    currentShopConfig=await FBA.api(`/api/shops/${manageShopId.value}/config`);
+    manageTitle.textContent=`${currentShopConfig.shop.name} · 集中配置`;manageShare.textContent=currentShopConfig.shop.share_url;managePrefix.textContent=currentShopConfig.shop.listing_prefix||'尚未确认';
+    trackingWebhook.value=currentShopConfig.connections.tracking.webhook_url||'';trackingToken.value='';
+    listingWebhook.value=currentShopConfig.connections.listing.webhook_url||'';listingToken.value='';
+    setConnectionPill(trackingPill,currentShopConfig.connections.tracking.configured);
+    setConnectionPill(listingPill,currentShopConfig.connections.listing.configured);
+    renderSites(currentShopConfig.sites||[]);
+    manageStatus.className='status';
+  }catch(e){FBA.showStatus(manageStatus,e.message,'error')}
+}
+function setConnectionPill(element,configured){element.textContent=configured?'已连接':'未配置';element.className=`pill ${configured?'success':''}`}
+async function saveModuleConnection(module,button){
+  const isTracking=module==='tracking',webhook=isTracking?trackingWebhook.value:listingWebhook.value,token=isTracking?trackingToken.value:listingToken.value;
+  const path=isTracking?'logistics-connection':'listing-connection';
+  FBA.buttonBusy(button,true,'连接中…');
+  try{const d=await FBA.api(`/api/shops/${manageShopId.value}/${path}`,{method:'POST',body:{webhook_url:webhook,api_token:token}});let message=d.message,kind='ok';try{const scanResult=await scanAndConfirm(false);message+=`；${scanResult.data.message}`;if(scanResult.cancelled){message+='；尚未确认Listing前缀';kind='info'}if(scanResult.data.warnings?.length){message+=`；提示：${scanResult.data.warnings.join('；')}`;kind='info'}}catch(scanError){message+=`；脚本已保存，但自动扫描未完成：${scanError.message}`;kind='info'}await loadManageConfig();FBA.showStatus(manageStatus,message,kind)}
+  catch(e){FBA.showStatus(manageStatus,e.message,'error')}finally{FBA.buttonBusy(button,false)}
+}
+async function scanAndConfirm(resetPrefix=false){
+  let data=await FBA.api(`/api/shops/${manageShopId.value}/discover-sites`,{method:'POST',body:{reset_listing_prefix:resetPrefix}});
+  if(!data.confirmation_required)return {data,cancelled:false};
+  const prefixes=data.available_listing_prefixes||[];
+  let selected='';
+  if(prefixes.length===1){
+    if(!confirm(`${data.message}？\n确认后会永久保存，后续扫描严格使用该前缀。`))return {data,cancelled:true};
+    selected=prefixes[0];
+  }else if(prefixes.length>1){
+    const answer=prompt(`${data.message}\n可选前缀：${prefixes.join('、')}\n请输入当前店铺使用的前缀：`,prefixes[0]);
+    if(answer===null)return {data,cancelled:true};
+    selected=answer.trim();
+    if(!selected)return {data,cancelled:true};
+  }else{
+    return {data,cancelled:true};
+  }
+  data=await FBA.api(`/api/shops/${manageShopId.value}/discover-sites`,{method:'POST',body:{confirm_listing_prefix:selected}});
+  return {data,cancelled:false};
+}
+async function scanSites(button,resetPrefix=false){
+  FBA.buttonBusy(button,true,'扫描中…');
+  try{const result=await scanAndConfirm(resetPrefix);const d=result.data,warning=d.warnings?.length?`；提示：${d.warnings.join('；')}`:'';await loadManageConfig();FBA.showStatus(manageStatus,d.message+warning+(result.cancelled?'；未修改已保存前缀':''),result.cancelled||d.warnings?.length?'info':'ok')}
+  catch(e){FBA.showStatus(manageStatus,e.message,'error')}finally{FBA.buttonBusy(button,false)}
+}
+function renderSites(sites){
+  siteList.replaceChildren();
+  if(!sites.length){const empty=document.createElement('p');empty.className='muted';empty.textContent='尚未识别国家站点。请先连接任一新版脚本并扫描共享表。';siteList.append(empty);return}
+  const table=document.createElement('table'),thead=document.createElement('thead'),headRow=document.createElement('tr');
+  ['站点','Listing子表','FBA主表','轨迹明细表','模块状态','操作'].forEach(value=>{const th=document.createElement('th');th.textContent=value;headRow.append(th)});thead.append(headRow);
+  const tbody=document.createElement('tbody');
+  sites.forEach(item=>{const tr=document.createElement('tr');
+    const values=[`${item.country_name}${item.country_code?' · '+item.country_code:''}`,item.listing_sheet_name||'—',item.fba_sheet_name||'—',item.detail_sheet_name||'—'];
+    values.forEach(value=>{const td=document.createElement('td');td.textContent=value;tr.append(td)});
+    const state=document.createElement('td');const listing=document.createElement('span');listing.className=`pill ${item.listing_ready?'success':''}`;listing.textContent=`Listing${item.listing_ready?'可用':'未就绪'}`;const tracking=document.createElement('span');tracking.className=`pill ${item.tracking_ready?'success':''}`;tracking.style.marginLeft='6px';tracking.textContent=`物流${item.tracking_ready?'可用':'未就绪'}`;state.append(listing,tracking);tr.append(state);
+    const actions=document.createElement('td'),wrap=document.createElement('div');wrap.className='actions';
+    const listingTest=document.createElement('button');listingTest.className='btn small';listingTest.textContent='测Listing';listingTest.disabled=!item.listing_ready;listingTest.onclick=()=>validateSite(item.id,'listing',listingTest);
+    const trackingTest=document.createElement('button');trackingTest.className='btn small';trackingTest.textContent='测物流';trackingTest.disabled=!item.tracking_ready;trackingTest.onclick=()=>validateSite(item.id,'tracking',trackingTest);
+    const edit=document.createElement('button');edit.className='btn small';edit.textContent='编辑';edit.onclick=()=>openSiteDialog(item);
+    const remove=document.createElement('button');remove.className='btn small danger';remove.textContent='删除';remove.onclick=()=>deleteSite(item.id);
+    wrap.append(listingTest,trackingTest,edit,remove);actions.append(wrap);tr.append(actions);tbody.append(tr);
+  });table.append(thead,tbody);siteList.append(table);
+}
+function openSiteDialog(item=null){siteId.value=item?.id||'';siteCountryName.value=item?.country_name||'';siteCountryCode.value=item?.country_code||'';siteListingSheet.value=item?.listing_sheet_name||'';siteFbaSheet.value=item?.fba_sheet_name||'';siteDetailSheet.value=item?.detail_sheet_name||'';siteDialogTitle.textContent=item?'编辑国家站点':'添加国家站点';siteDialog.showModal()}
+async function saveSite(button){FBA.buttonBusy(button,true,'保存中…');try{const d=await FBA.api(`/api/shops/${manageShopId.value}/sites`,{method:'POST',body:{id:siteId.value,country_name:siteCountryName.value,country_code:siteCountryCode.value,listing_sheet_name:siteListingSheet.value,fba_sheet_name:siteFbaSheet.value,detail_sheet_name:siteDetailSheet.value}});siteDialog.close();await loadManageConfig();FBA.showStatus(manageStatus,d.message,'ok')}catch(e){FBA.showStatus(manageStatus,e.message,'error')}finally{FBA.buttonBusy(button,false)}}
+async function validateSite(id,module,button){FBA.buttonBusy(button,true,'测试中…');try{const d=await FBA.api(`/api/shops/${manageShopId.value}/sites/${id}/validation`,{method:'POST',body:{module}});FBA.showStatus(manageStatus,d.message,'ok')}catch(e){FBA.showStatus(manageStatus,e.message,'error')}finally{FBA.buttonBusy(button,false)}}
+async function deleteSite(id){if(!confirm('确定删除这个国家站点映射？不会删除WPS中的表格内容。'))return;try{const d=await FBA.api(`/api/inventory/countries/${id}`,{method:'DELETE'});await loadManageConfig();FBA.showStatus(manageStatus,d.message,'ok')}catch(e){FBA.showStatus(manageStatus,e.message,'error')}}
 </script>
 {% endblock %}

@@ -200,6 +200,9 @@ def test_only_tracking_page_starts_live_carrier_check_on_page_open(tmp_path):
         assert "initializeCarrierPage();" in carriers.text
         assert "本页面不会自动登录货代" in carriers.text
         assert "正在后台自动登录或检查三家货代" in tracking.text
+        assert "本次共享表更新明细" in tracking.text
+        assert "updated_cells" in tracking.text
+        assert "仅“物流最后更新时间”刷新，未标蓝" in tracking.text
         assert "\ncheckCarriers(null,true).catch(()=>{});" in tracking.text
         assert "未检查" in carriers.text
         assert "待实时检查" in tracking.text
@@ -345,13 +348,22 @@ def test_automatic_shop_task_stops_when_required_carrier_is_disconnected(
     with TestClient(app) as client:
         csrf = bootstrap_and_login(client)
         account = app.state.users.list_users()[0]
-        shop = ProjectDatabase(data_dir / "app.db", account.id).save_shop(
+        database = ProjectDatabase(data_dir / "app.db", account.id)
+        shop = database.save_shop(
             "测试店铺",
             AirScriptConfig(
                 "https://www.kdocs.cn/l/store",
                 "https://www.kdocs.cn/api/v3/ide/file/f/script/s/sync_task",
                 "store-token",
             ),
+        )
+        site = database.save_shop_country(
+            shop.id,
+            "美国",
+            "测试店铺-美国",
+            country_code="US",
+            fba_sheet_name="US-FBA",
+            detail_sheet_name="US-轨迹明细",
         )
 
         class FakeAirScriptClient:
@@ -374,6 +386,7 @@ def test_automatic_shop_task_stops_when_required_carrier_is_disconnected(
         response = client.post(
             f"/api/shops/{shop.id}/tracking-sync",
             headers={"X-CSRF-Token": csrf},
+            json={"country_id": site.id},
         )
         assert response.status_code == 409
         assert "自动任务已停止" in response.json()["message"]
@@ -387,13 +400,22 @@ def test_automatic_shop_task_reads_pending_then_queries_and_syncs(tmp_path, monk
     with TestClient(app) as client:
         csrf = bootstrap_and_login(client)
         account = app.state.users.list_users()[0]
-        shop = ProjectDatabase(data_dir / "app.db", account.id).save_shop(
+        database = ProjectDatabase(data_dir / "app.db", account.id)
+        shop = database.save_shop(
             "测试店铺",
             AirScriptConfig(
                 "https://www.kdocs.cn/l/store",
                 "https://www.kdocs.cn/api/v3/ide/file/f/script/s/sync_task",
                 "store-token",
             ),
+        )
+        site = database.save_shop_country(
+            shop.id,
+            "美国",
+            "测试店铺-美国",
+            country_code="US",
+            fba_sheet_name="US-FBA",
+            detail_sheet_name="US-轨迹明细",
         )
         validated = {}
 
@@ -432,12 +454,80 @@ def test_automatic_shop_task_reads_pending_then_queries_and_syncs(tmp_path, monk
         response = client.post(
             f"/api/shops/{shop.id}/tracking-sync",
             headers={"X-CSRF-Token": csrf},
+            json={"country_id": site.id},
         )
         assert response.status_code == 200
         assert response.json()["pending_count"] == 2
         assert [item.fba for item in called["items"]] == ["FBA11111", "FBA22222"]
         assert validated["required"] == {"anda", "chaohong"}
         assert called["config"].api_token == "store-token"
+        assert called["config"].sheet_name == "US-FBA"
+        assert called["config"].detail_sheet_name == "US-轨迹明细"
+
+
+def test_shop_discovery_saves_sites_with_one_stable_listing_prefix(
+    tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "data"
+    app = create_app(data_dir)
+    with TestClient(app) as client:
+        csrf = bootstrap_and_login(client)
+        account = app.state.users.list_users()[0]
+        database = ProjectDatabase(data_dir / "app.db", account.id)
+        shop = database.save_shop(
+            "纯粹测试",
+            AirScriptConfig("https://www.kdocs.cn/l/store", "", ""),
+        )
+        database.save_listing_connection(
+            shop.id,
+            "https://www.kdocs.cn/api/v3/ide/file/f/script/listing/sync_task",
+            "listing-token",
+        )
+
+        class FakeListingAirScriptClient:
+            def __init__(self, _config, retries=0):
+                pass
+
+            def discover_sheets(self):
+                return [
+                    {"id": "listing-us", "name": "纯粹-美国"},
+                    {"id": "main-us", "name": "US-FBA"},
+                    {"id": "detail-us", "name": "US-轨迹明细"},
+                    {"id": "listing-ca", "name": "纯粹-加拿大"},
+                    {"id": "main-ca", "name": "CA-FBA"},
+                    {"id": "detail-ca", "name": "CA-轨迹明细"},
+                ]
+
+        monkeypatch.setattr(
+            "anda_tracker.web.app.ListingAirScriptClient",
+            FakeListingAirScriptClient,
+        )
+        response = client.post(
+            f"/api/shops/{shop.id}/discover-sites",
+            headers={"X-CSRF-Token": csrf},
+            json={},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["confirmation_required"] is True
+        assert response.json()["available_listing_prefixes"] == ["纯粹"]
+        assert response.json()["sites"] == []
+
+        confirmed = client.post(
+            f"/api/shops/{shop.id}/discover-sites",
+            headers={"X-CSRF-Token": csrf},
+            json={"confirm_listing_prefix": "纯粹"},
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["confirmation_required"] is False
+        sites = confirmed.json()["sites"]
+        assert [item["country_code"] for item in sites] == ["US", "CA"]
+        assert sites[1]["listing_sheet_name"] == "纯粹-加拿大"
+        assert sites[1]["fba_sheet_name"] == "CA-FBA"
+        assert sites[1]["detail_sheet_name"] == "CA-轨迹明细"
+        assert sites[1]["listing_ready"] is True
+        assert sites[1]["tracking_ready"] is False
+        assert database.get_shop(shop.id).listing_prefix == "纯粹"
 
 
 def test_routed_query_only_calls_carrier_named_in_sheet(tmp_path):

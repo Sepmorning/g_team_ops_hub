@@ -6,13 +6,13 @@
     <h1>库存销售表格</h1>
     <p>选择店铺和国家，预览领星导出文件，再确认更新对应 Listing 子表。</p>
   </div>
-  <span class="badge">按表头识别</span>
+  <a class="btn" href="/shops">管理店铺配置</a>
 </header>
 
 {% if not shops %}
 <section class="card" style="text-align:center;padding:55px 24px">
   <h2>请先添加店铺</h2>
-  <p>Listing 模块沿用“我的店铺”中的共享表链接，但使用独立的 AirScript Webhook 和令牌。</p>
+  <p>共享表链接、Listing脚本和国家站点都统一在“我的店铺”配置。</p>
   <a class="btn primary" href="/shops">前往添加店铺</a>
 </section>
 {% else %}
@@ -21,8 +21,8 @@
 <section class="card" style="margin-bottom:18px">
   <div class="section-head">
     <div>
-      <h2>1. 选择店铺并完成一次配置</h2>
-      <p style="margin:5px 0 0">物流脚本配置不会被改动。</p>
+      <h2>1. 选择店铺和国家站点</h2>
+      <p style="margin:5px 0 0">这里不再保存连接信息，只使用“我的店铺”中的集中配置。</p>
     </div>
   </div>
   <div class="form-grid">
@@ -35,32 +35,14 @@
       </select>
     </div>
     <div class="field">
-      <label>共享表</label>
-      <input id="shareUrl" readonly>
+      <label for="countrySelect">国家 / Listing 子表</label>
+      <select id="countrySelect" onchange="validateSelectedSite()"></select>
     </div>
-    <div class="field">
-      <label for="listingWebhook">Listing 脚本 Webhook</label>
-      <input id="listingWebhook" placeholder="https://www.kdocs.cn/api/v3/ide/…/sync_task">
-    </div>
-    <div class="field">
-      <label for="listingToken">Listing 脚本令牌</label>
-      <input id="listingToken" type="password" autocomplete="new-password" placeholder="已保存时留空即可">
+    <div class="field full">
+      <label>模块连接状态</label>
+      <div id="connectionHint" class="status show info" style="margin:0">正在读取店铺配置…</div>
     </div>
   </div>
-  <div class="actions" style="margin-top:15px">
-    <button id="saveConnectionButton" class="btn primary" onclick="saveListingConnection(this)">保存独立连接</button>
-    <span id="connectionHint" class="muted"></span>
-  </div>
-
-  <div class="divider"></div>
-  <div class="section-head">
-    <div>
-      <h2 style="font-size:18px">国家与 Listing 子表</h2>
-      <p style="margin:5px 0 0">真实名称示例：纯粹-美国、纯粹-加拿大。</p>
-    </div>
-    <button class="btn" onclick="openCountryDialog()">添加国家</button>
-  </div>
-  <div id="countryList" class="grid cols-2"></div>
 </section>
 
 <section class="card">
@@ -72,10 +54,6 @@
   </div>
   <div class="form-grid">
     <div class="field">
-      <label for="countrySelect">国家 / Listing 子表</label>
-      <select id="countrySelect"></select>
-    </div>
-    <div class="field">
       <label for="dataDate">本次数据日期</label>
       <input id="dataDate" type="date">
     </div>
@@ -86,7 +64,7 @@
   </div>
   <div class="actions" style="margin-top:15px">
     <button id="previewButton" class="btn primary" onclick="previewListing(this)">读取并预览</button>
-    <span class="muted">未来新增的领星列会被忽略，现有 17 个标准表头按名称匹配。</span>
+    <span class="muted">未来新增的领星列会被忽略，现有标准表头按名称匹配。</span>
   </div>
 </section>
 
@@ -110,26 +88,6 @@
     </table>
   </div>
 </section>
-
-<dialog id="countryDialog">
-  <div class="dialog-body">
-    <div class="section-head">
-      <h2 id="countryDialogTitle">添加国家</h2>
-      <button class="btn small" onclick="countryDialog.close()">关闭</button>
-    </div>
-    <input id="countryId" type="hidden">
-    <div class="field">
-      <label for="countryName">国家名称</label>
-      <input id="countryName" maxlength="40" placeholder="例如：美国">
-    </div>
-    <div class="field" style="margin-top:12px">
-      <label for="countrySheet">Listing 子表真实名称</label>
-      <input id="countrySheet" maxlength="80" placeholder="例如：纯粹-美国">
-    </div>
-    <p class="muted">保存时会立即连接 WPS，并验证完整表头；请先按使用说明修改该子表。</p>
-    <button id="saveCountryButton" class="btn primary" style="width:100%" onclick="saveCountry(this)">保存并验证子表</button>
-  </div>
-</dialog>
 {% endif %}
 {% endblock %}
 
@@ -144,67 +102,38 @@ function showInventory(message,kind='info'){FBA.showStatus(inventoryStatus,messa
 function valueText(value){return value===null||value===undefined?'—':String(value)}
 
 async function loadInventoryConfig(){
-  previewId='';previewCard.classList.add('hidden');
+  previewId='';previewCard.classList.add('hidden');countrySelect.replaceChildren();countrySelect.disabled=true;
+  FBA.showStatus(connectionHint,'正在读取店铺和站点配置…','info');
   try{
     inventoryConfig=await FBA.api(`/api/inventory/config?shop_id=${encodeURIComponent(shopSelect.value)}`);
-    shareUrl.value=inventoryConfig.shop.share_url;
-    listingWebhook.value=inventoryConfig.connection.webhook_url||'';
-    listingToken.value='';
-    connectionHint.textContent=inventoryConfig.connection.configured?'已保存独立连接':'尚未配置独立连接';
-    renderCountries();
+    const countries=inventoryConfig.countries||[];
+    countries.forEach(item=>{
+      const option=document.createElement('option');
+      option.value=item.id;
+      option.textContent=`${item.country_name}${item.country_code?' · '+item.country_code:''} · ${item.listing_sheet_name}`;
+      option.disabled=!item.listing_ready;
+      countrySelect.append(option);
+    });
+    const ready=countries.filter(item=>item.listing_ready);
+    countrySelect.disabled=!ready.length;
+    if(!inventoryConfig.connection.configured){
+      FBA.showStatus(connectionHint,'该店铺尚未配置Listing脚本，请前往“我的店铺”完成配置','error');
+    }else if(!ready.length){
+      FBA.showStatus(connectionHint,'该店铺尚无可用Listing站点，请在“我的店铺”扫描或补全站点','error');
+    }else{
+      countrySelect.value=ready[0].id;
+      await validateSelectedSite();
+    }
   }catch(e){showInventory(e.message,'error')}
 }
 
-function renderCountries(){
-  countryList.replaceChildren();countrySelect.replaceChildren();
-  const countries=inventoryConfig?.countries||[];
-  countries.forEach(item=>{
-    const option=document.createElement('option');option.value=item.id;option.textContent=`${item.country_name} · ${item.sheet_name}`;countrySelect.append(option);
-    const card=document.createElement('article');card.className='card';card.style.boxShadow='none';card.style.padding='15px';
-    const title=document.createElement('strong');title.textContent=item.country_name;
-    const sheet=document.createElement('p');sheet.textContent=item.sheet_name;sheet.style.margin='5px 0 11px';
-    const actions=document.createElement('div');actions.className='actions';
-    const validate=document.createElement('button');validate.className='btn small';validate.textContent='测试连接';validate.onclick=()=>validateCountry(item.id,validate);
-    const edit=document.createElement('button');edit.className='btn small';edit.textContent='编辑';edit.onclick=()=>openCountryDialog(item);
-    const remove=document.createElement('button');remove.className='btn small danger';remove.textContent='删除';remove.onclick=()=>deleteCountry(item.id);
-    actions.append(validate,edit,remove);card.append(title,sheet,actions);countryList.append(card);
-  });
-  if(!countries.length){
-    const empty=document.createElement('p');empty.className='muted';empty.textContent='还没有国家配置。保存独立连接后，添加国家和子表名称。';countryList.append(empty);
-  }
-}
-
-async function saveListingConnection(button){
-  FBA.buttonBusy(button,true,'保存中…');
+async function validateSelectedSite(){
+  if(!shopSelect.value||!countrySelect.value)return;
+  FBA.showStatus(connectionHint,'正在验证所选Listing子表…','info');
   try{
-    const data=await FBA.api(`/api/shops/${shopSelect.value}/listing-connection`,{method:'POST',body:{webhook_url:listingWebhook.value,api_token:listingToken.value}});
-    showInventory(data.message,'ok');await loadInventoryConfig();
-  }catch(e){showInventory(e.message,'error')}finally{FBA.buttonBusy(button,false)}
-}
-
-function openCountryDialog(item=null){
-  countryId.value=item?.id||'';countryName.value=item?.country_name||'';countrySheet.value=item?.sheet_name||'';
-  countryDialogTitle.textContent=item?'编辑国家':'添加国家';countryDialog.showModal();
-}
-
-async function saveCountry(button){
-  FBA.buttonBusy(button,true,'连接并验证…');
-  try{
-    const data=await FBA.api(`/api/shops/${shopSelect.value}/countries`,{method:'POST',body:{id:countryId.value,country_name:countryName.value,sheet_name:countrySheet.value}});
-    countryDialog.close();showInventory(data.message,'ok');await loadInventoryConfig();
-  }catch(e){FBA.showStatus(inventoryStatus,e.message,'error')}finally{FBA.buttonBusy(button,false)}
-}
-
-async function validateCountry(id,button){
-  FBA.buttonBusy(button,true,'测试中…');
-  try{const data=await FBA.api(`/api/inventory/countries/${id}/validation`,{method:'POST',body:{shop_id:shopSelect.value}});showInventory(data.message,'ok')}
-  catch(e){showInventory(e.message,'error')}finally{FBA.buttonBusy(button,false)}
-}
-
-async function deleteCountry(id){
-  if(!confirm('确定删除这个国家映射？不会删除WPS中的任何内容。'))return;
-  try{const data=await FBA.api(`/api/inventory/countries/${id}`,{method:'DELETE'});showInventory(data.message,'ok');await loadInventoryConfig()}
-  catch(e){showInventory(e.message,'error')}
+    const data=await FBA.api(`/api/shops/${shopSelect.value}/sites/${countrySelect.value}/validation`,{method:'POST',body:{module:'listing'}});
+    FBA.showStatus(connectionHint,data.message,'ok');
+  }catch(e){FBA.showStatus(connectionHint,e.message,'error')}
 }
 
 function inferFileDate(){
@@ -213,7 +142,7 @@ function inferFileDate(){
 }
 
 async function previewListing(button){
-  if(!countrySelect.value){showInventory('请先添加并选择国家配置','error');return}
+  if(!countrySelect.value){showInventory('请先选择已连接Listing脚本的国家站点','error');return}
   if(!listingFile.files[0]){showInventory('请选择领星导出的.xlsx文件','error');return}
   const form=new FormData();form.append('shop_id',shopSelect.value);form.append('country_id',countrySelect.value);form.append('data_date',dataDate.value);form.append('file',listingFile.files[0]);
   FBA.buttonBusy(button,true,'读取并验证…');

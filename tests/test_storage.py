@@ -89,6 +89,25 @@ def test_multiple_shops_are_encrypted_and_isolated_by_profile(tmp_path):
     assert "token-one" not in ciphertext
 
 
+def test_shop_basic_information_can_be_saved_before_module_connections(tmp_path):
+    database = ProjectDatabase(tmp_path / "app.db", profile_id="owner")
+    shop = database.save_shop(
+        "纯粹",
+        AirScriptConfig("https://www.kdocs.cn/l/share-one", "", ""),
+    )
+
+    loaded = database.get_shop(shop.id)
+    assert loaded is not None
+    assert loaded.name == "纯粹"
+    assert loaded.config.share_url == "https://www.kdocs.cn/l/share-one"
+    assert loaded.config.webhook_url == ""
+    assert loaded.config.api_token == ""
+    assert loaded.listing_prefix == ""
+
+    database.save_shop_listing_prefix(shop.id, "纯粹")
+    assert database.get_shop(shop.id).listing_prefix == "纯粹"
+
+
 def test_legacy_airscript_config_migrates_to_default_shop(tmp_path):
     path = tmp_path / "app.db"
     with sqlite3.connect(path) as connection:
@@ -163,13 +182,22 @@ def test_listing_connection_and_country_mapping_are_encrypted_and_isolated(tmp_p
         "listing-secret-token",
     )
     country = first.save_shop_country(
-        shop.id, "美国", "纯粹-美国"
+        shop.id,
+        "美国",
+        "纯粹-美国",
+        country_code="US",
+        fba_sheet_name="US-FBA",
+        detail_sheet_name="US-轨迹明细",
     )
 
     loaded = first.load_listing_connection(shop.id)
     assert loaded is not None
     assert loaded.api_token == "listing-secret-token"
-    assert first.get_shop_country(country.id).sheet_name == "纯粹-美国"
+    loaded_country = first.get_shop_country(country.id)
+    assert loaded_country.sheet_name == "纯粹-美国"
+    assert loaded_country.country_code == "US"
+    assert loaded_country.fba_sheet_name == "US-FBA"
+    assert loaded_country.detail_sheet_name == "US-轨迹明细"
     assert second.load_listing_connection(shop.id) is None
     assert second.get_shop_country(country.id) is None
     with sqlite3.connect(path) as connection:

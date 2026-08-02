@@ -1,6 +1,6 @@
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 9;
 const DEFAULT_SHEET_NAME = "US-FBA";
-const DETAIL_SHEET_NAME = "US-轨迹明细";
+const DEFAULT_DETAIL_SHEET_NAME = "US-轨迹明细";
 const HEADER_END_COLUMN = "CV";
 const MAX_SCAN_ROW = 20000;
 const MAX_ITEMS = 50;
@@ -70,6 +70,15 @@ const MAIN_VALUE_FIELDS = [
     "updated_time"
 ];
 
+// “矢车菊蓝，着色1，浅色80%”使用工作簿主题色，随当前WPS主题保持一致。
+// 物流最后更新时间只是审计时间：继续写入，但不作为业务变化着色。
+const SYSTEM_HIGHLIGHT_THEME_COLOR = 5;
+const SYSTEM_HIGHLIGHT_TINT = 0.8;
+const SYSTEM_NO_FILL_COLOR_INDEX = -4142;
+const BUSINESS_HIGHLIGHT_FIELDS = MAIN_VALUE_FIELDS.filter(function (field) {
+    return field !== "updated_time";
+});
+
 const PROTECTED_ACTUAL_FIELDS = {
     pickup_time: true,
     actual_departure: true,
@@ -126,6 +135,19 @@ function normalizeText(value) {
 
 function displayText(value) {
     return String(value === null || value === undefined ? "" : value).trim();
+}
+
+function workbookSheets() {
+    const sheets = Application.Sheets;
+    const result = [];
+    for (let index = 1; index <= sheets.Count; index++) {
+        const sheet = sheets.Item(index);
+        result.push({
+            id: displayText(sheet.Id),
+            name: displayText(sheet.Name)
+        });
+    }
+    return result;
 }
 
 function padNumber(value) {
@@ -194,6 +216,13 @@ function comparableMainValue(field, value) {
     return displayText(value);
 }
 
+function comparableDetailValue(field, value) {
+    if (DETAIL_DATE_TIME_FIELDS[field]) {
+        return normalizedDateText(value, true);
+    }
+    return displayText(value);
+}
+
 function normalizeFba(value) {
     return normalizeText(value).toUpperCase();
 }
@@ -243,6 +272,81 @@ function pushUnique(values, value) {
     if (values.indexOf(value) < 0) {
         values.push(value);
     }
+}
+
+function errorText(error) {
+    const text = displayText(error && error.message ? error.message : error);
+    return text.length > 120 ? text.slice(0, 120) + "…" : text;
+}
+
+function pushFormatFailure(values, fba, address, operation, error) {
+    pushUnique(
+        values,
+        fba + "：" + address + "（" + operation + "失败：" + errorText(error) + "）"
+    );
+}
+
+function isSystemHighlight(cell) {
+    let interior;
+    try {
+        interior = cell.Interior;
+    } catch (error) {
+        return false;
+    }
+    try {
+        if (Number(interior.ColorIndex) === SYSTEM_NO_FILL_COLOR_INDEX) {
+            return false;
+        }
+    } catch (error) {
+        // 部分无填充单元格读取ColorIndex时可能返回空值，继续检查主题属性。
+    }
+    try {
+        return (
+            Number(interior.ThemeColor) === SYSTEM_HIGHLIGHT_THEME_COLOR &&
+            Math.abs(Number(interior.TintAndShade) - SYSTEM_HIGHLIGHT_TINT) < 0.02
+        );
+    } catch (error) {
+        // 手工RGB填充不一定具有主题属性，不把它当作系统旧高亮。
+        return false;
+    }
+}
+
+function clearPreviousSystemHighlights(
+    sheet,
+    columns,
+    acceptedItems,
+    formatFailures
+) {
+    for (let itemIndex = 0; itemIndex < acceptedItems.length; itemIndex++) {
+        const item = acceptedItems[itemIndex];
+        for (
+            let fieldIndex = 0;
+            fieldIndex < BUSINESS_HIGHLIGHT_FIELDS.length;
+            fieldIndex++
+        ) {
+            const field = BUSINESS_HIGHLIGHT_FIELDS[fieldIndex];
+            const address = columns[field].columnLetter + item.row;
+            try {
+                const cell = sheet.Range(address);
+                if (isSystemHighlight(cell)) {
+                    cell.Interior.ColorIndex = SYSTEM_NO_FILL_COLOR_INDEX;
+                }
+            } catch (error) {
+                pushFormatFailure(
+                    formatFailures,
+                    item.fba,
+                    address,
+                    "清除旧高亮",
+                    error
+                );
+            }
+        }
+    }
+}
+
+function applySystemHighlight(range) {
+    range.Interior.ThemeColor = SYSTEM_HIGHLIGHT_THEME_COLOR;
+    range.Interior.TintAndShade = SYSTEM_HIGHLIGHT_TINT;
 }
 
 function findTargetSheet(sheetName) {
@@ -457,7 +561,14 @@ function mainColumnBounds(columns) {
     return { minimum: minimum, maximum: maximum };
 }
 
-function writeGroupsForColumn(sheet, columnLetter, writes, states) {
+function writeGroupsForColumn(
+    sheet,
+    columnLetter,
+    writes,
+    states,
+    updatedCells,
+    formatFailures
+) {
     writes.sort(function (left, right) { return left.row - right.row; });
     const groups = [];
     for (let index = 0; index < writes.length; index++) {
@@ -470,16 +581,71 @@ function writeGroupsForColumn(sheet, columnLetter, writes, states) {
         }
     }
 
+    function recordSuccess(item) {
+        const state = states[item.fba];
+        state.written = true;
+        if (item.business) {
+            state.businessWritten = true;
+            updatedCells.push({
+                fba: item.fba,
+                row: item.row,
+                address: item.address,
+                field: item.field,
+                header: item.header,
+                oldValue: item.oldValue,
+                newValue: item.newValue
+            });
+        } else if (item.field === "updated_time") {
+            state.auditWritten = true;
+        }
+    }
+
     function markSuccess(group) {
         for (let index = 0; index < group.length; index++) {
-            states[group[index].fba].written = true;
+            recordSuccess(group[index]);
+        }
+    }
+
+    function highlightSingle(item) {
+        if (!item.business) {
+            return;
+        }
+        try {
+            applySystemHighlight(sheet.Range(item.address));
+        } catch (error) {
+            pushFormatFailure(
+                formatFailures,
+                item.fba,
+                item.address,
+                "设置本次更新高亮",
+                error
+            );
+        }
+    }
+
+    function highlightGroup(group) {
+        if (!group[0].business) {
+            return;
+        }
+        try {
+            applySystemHighlight(
+                sheet.Range(
+                    columnLetter + group[0].row + ":" +
+                    columnLetter + group[group.length - 1].row
+                )
+            );
+        } catch (error) {
+            for (let index = 0; index < group.length; index++) {
+                highlightSingle(group[index]);
+            }
         }
     }
 
     function writeSingle(item) {
         try {
             sheet.Range(columnLetter + item.row).Value2 = item.value;
-            states[item.fba].written = true;
+            recordSuccess(item);
+            highlightSingle(item);
         } catch (error) {
             states[item.fba].failed = true;
         }
@@ -497,6 +663,7 @@ function writeGroupsForColumn(sheet, columnLetter, writes, states) {
                 columnLetter + group[group.length - 1].row
             ).Value2 = group.map(function (item) { return [item.value]; });
             markSuccess(group);
+            highlightGroup(group);
         } catch (error) {
             for (let itemIndex = 0; itemIndex < group.length; itemIndex++) {
                 writeSingle(group[itemIndex]);
@@ -546,7 +713,7 @@ function writeDetailUpdates(detailSheet, detailColumns, writesByField) {
 }
 
 function syncEvents(detailSheet, detailColumns, acceptedItems) {
-    const detailLastRow = lastUsedRow(detailSheet, DETAIL_SHEET_NAME);
+    const detailLastRow = lastUsedRow(detailSheet, detailSheet.Name);
     const existingIds = Object.create(null);
     const mutableFields = [
         "carrier_order_no",
@@ -633,8 +800,8 @@ function syncEvents(detailSheet, detailColumns, acceptedItems) {
             }
             const existing = existingIds[eventId];
             if (existing) {
-                unchangedCount++;
                 if (existing.isNew) {
+                    unchangedCount++;
                     continue;
                 }
                 let eventChanged = false;
@@ -645,10 +812,12 @@ function syncEvents(detailSheet, detailColumns, acceptedItems) {
                 ) {
                     const field = mutableFields[fieldIndex];
                     const incoming = displayText(event[field]);
-                    const current = displayText(
-                        mutableValues[field][existing.index]
-                    );
-                    if (incoming !== "" && incoming !== current) {
+                    const currentRaw = mutableValues[field][existing.index];
+                    if (
+                        incoming !== "" &&
+                        comparableDetailValue(field, incoming) !==
+                            comparableDetailValue(field, currentRaw)
+                    ) {
                         writesByField[field].push({
                             row: existing.row,
                             value: incoming
@@ -658,6 +827,8 @@ function syncEvents(detailSheet, detailColumns, acceptedItems) {
                 }
                 if (eventChanged) {
                     updatedCount++;
+                } else {
+                    unchangedCount++;
                 }
                 continue;
             }
@@ -731,12 +902,13 @@ function syncEvents(detailSheet, detailColumns, acceptedItems) {
 const argv = Context && Context.argv ? Context.argv : {};
 const action = normalizeText(argv.action || "validate").toLowerCase();
 const sheetName = normalizeText(argv.sheet_name || DEFAULT_SHEET_NAME);
+const detailSheetName = normalizeText(
+    argv.detail_sheet_name || DEFAULT_DETAIL_SHEET_NAME
+);
 const items = Array.isArray(argv.items) ? argv.items : [];
 
-if (sheetName !== DEFAULT_SHEET_NAME) {
-    throw new Error("当前脚本只允许处理 " + DEFAULT_SHEET_NAME);
-}
 if (
+    action !== "discover" &&
     action !== "validate" &&
     action !== "sync" &&
     action !== "sync_tracking" &&
@@ -745,17 +917,31 @@ if (
     throw new Error("不支持的操作：" + action);
 }
 
+if (action === "discover") {
+    const discoveryResult = {
+        success: true,
+        schemaVersion: SCHEMA_VERSION,
+        sheets: workbookSheets()
+    };
+    console.log(JSON.stringify(discoveryResult));
+    return discoveryResult;
+}
+
+if (sheetName === "" || detailSheetName === "") {
+    throw new Error("未提供FBA主表或轨迹明细表名称");
+}
+
 const targetSheet = findTargetSheet(sheetName);
-const detailSheet = findTargetSheet(DETAIL_SHEET_NAME);
+const detailSheet = findTargetSheet(detailSheetName);
 const columns = findColumnsByDefinitions(
     targetSheet,
     MAIN_FIELD_DEFINITIONS,
-    DEFAULT_SHEET_NAME
+    sheetName
 );
 const detailColumns = findColumnsByDefinitions(
     detailSheet,
     DETAIL_FIELD_DEFINITIONS,
-    DETAIL_SHEET_NAME
+    detailSheetName
 );
 const baseResult = {
     success: true,
@@ -773,7 +959,7 @@ if (action === "validate") {
     return baseResult;
 }
 
-const lastRow = lastUsedRow(targetSheet, DEFAULT_SHEET_NAME);
+const lastRow = lastUsedRow(targetSheet, sheetName);
 
 if (action === "list_pending") {
     const offset = Math.max(0, Number(argv.offset) || 0);
@@ -811,20 +997,13 @@ if (action === "list_pending") {
             columns.carrier.columnLetter + lastRow
         ).Value2
     );
-    const updatedValues = singleColumnValues(
-        targetSheet.Range(
-            columns.updated_time.columnLetter + "2:" +
-            columns.updated_time.columnLetter + lastRow
-        ).Value2
-    );
     const pending = [];
     const seen = Object.create(null);
     for (let index = 0; index < allFbaValues.length; index++) {
         const fba = normalizeFba(allFbaValues[index]);
         const completed = normalizeText(completionValues[index]).toLowerCase();
-        const hasSnapshot = normalizeText(updatedValues[index]) !== "";
-        // 已完成的旧记录仍会补写一次完整快照和历史明细，之后不再重复查询。
-        if (!isValidFba(fba) || (completed === "是" && hasSnapshot)) {
+        // 一键更新严格只查询“是否完成”为空的记录；任何非空状态都完全跳过。
+        if (!isValidFba(fba) || completed !== "") {
             continue;
         }
         if (!seen[fba]) {
@@ -851,20 +1030,26 @@ if (items.length > MAX_ITEMS) {
 }
 
 const updated = [];
+const auditOnly = [];
 const unchanged = [];
 const notInSheet = [];
 const duplicateRows = [];
 const failures = [];
 const conflicts = [];
+const updatedCells = [];
+const formatFailures = [];
 
 if (items.length === 0) {
     return Object.assign(baseResult, {
         updated: updated,
+        auditOnly: auditOnly,
         unchanged: unchanged,
         notInSheet: notInSheet,
         duplicateRows: duplicateRows,
         failures: failures,
         conflicts: conflicts,
+        updatedCells: updatedCells,
+        formatFailures: formatFailures,
         eventsAdded: 0,
         eventsUpdated: 0,
         eventsUnchanged: 0
@@ -926,7 +1111,9 @@ for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
     states[fba] = {
         changed: false,
         written: false,
-        failed: false
+        failed: false,
+        businessWritten: false,
+        auditWritten: false
     };
 
     for (let fieldIndex = 0; fieldIndex < MAIN_VALUE_FIELDS.length; fieldIndex++) {
@@ -958,7 +1145,13 @@ for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
         writesByColumn[field].push({
             fba: fba,
             row: row,
-            value: incoming
+            value: incoming,
+            field: field,
+            address: column.columnLetter + row,
+            header: column.text,
+            oldValue: comparableCurrent,
+            newValue: comparableIncoming,
+            business: BUSINESS_HIGHLIGHT_FIELDS.indexOf(field) >= 0
         });
     }
 
@@ -969,6 +1162,14 @@ for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
     });
 }
 
+// 只清理物流标准字段中由本脚本留下的旧主题高亮；其他业务列和手工填充不动。
+clearPreviousSystemHighlights(
+    targetSheet,
+    columns,
+    acceptedItems,
+    formatFailures
+);
+
 const writeFields = Object.keys(writesByColumn);
 for (let fieldIndex = 0; fieldIndex < writeFields.length; fieldIndex++) {
     const field = writeFields[fieldIndex];
@@ -976,7 +1177,9 @@ for (let fieldIndex = 0; fieldIndex < writeFields.length; fieldIndex++) {
         targetSheet,
         columns[field].columnLetter,
         writesByColumn[field],
-        states
+        states,
+        updatedCells,
+        formatFailures
     );
 }
 // 无论查询服务内部如何并发，明细都按主表实际行号排列。
@@ -998,12 +1201,21 @@ for (let index = 0; index < stateFbas.length; index++) {
     if (state.failed) {
         pushUnique(failures, fba);
     }
-    if (state.written) {
+    if (state.businessWritten) {
         updated.push(fba);
+    } else if (state.auditWritten && !state.failed) {
+        auditOnly.push(fba);
     } else if (!state.failed) {
         unchanged.push(fba);
     }
 }
+
+updatedCells.sort(function (left, right) {
+    if (left.row !== right.row) {
+        return left.row - right.row;
+    }
+    return columns[left.field].columnNumber - columns[right.field].columnNumber;
+});
 
 let eventSummary = { added: 0, updated: 0, unchanged: 0 };
 if (action === "sync_tracking") {
@@ -1026,11 +1238,14 @@ if (action === "sync_tracking") {
 
 const result = Object.assign(baseResult, {
     updated: updated,
+    auditOnly: auditOnly,
     unchanged: unchanged,
     notInSheet: notInSheet,
     duplicateRows: duplicateRows,
     failures: failures,
     conflicts: conflicts,
+    updatedCells: updatedCells,
+    formatFailures: formatFailures,
     eventsAdded: eventSummary.added,
     eventsUpdated: eventSummary.updated,
     eventsUnchanged: eventSummary.unchanged

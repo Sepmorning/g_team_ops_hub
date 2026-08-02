@@ -55,7 +55,7 @@ def config(token="placeholder-airscript-token"):
 def finished(result):
     if isinstance(result, dict) and result.get("success") is True:
         result = {
-            "schemaVersion": 5,
+            "schemaVersion": 8,
             "detailSheetName": "US-轨迹明细",
             **result,
         }
@@ -113,11 +113,50 @@ def test_validate_reads_auto_detected_columns_and_never_places_token_in_body():
     assert kwargs["json"]["Context"]["argv"]["action"] == "validate"
 
 
+def test_dynamic_country_sheet_names_and_workbook_discovery_are_forwarded():
+    dynamic_config = AirScriptConfig(
+        "https://www.kdocs.cn/l/share123",
+        WEBHOOK,
+        "placeholder-airscript-token",
+        "CA-FBA",
+        "CA-轨迹明细",
+    )
+    session = FakeSession(
+        [
+            FakeResponse(
+                body=finished(
+                    {
+                        "success": True,
+                        "schemaVersion": 9,
+                        "sheets": [
+                            {"id": "listing", "name": "纯粹-加拿大"},
+                            {"id": "main", "name": "CA-FBA"},
+                            {"id": "detail", "name": "CA-轨迹明细"},
+                        ],
+                    }
+                )
+            )
+        ]
+    )
+
+    sheets = AirScriptClient(dynamic_config, session=session).discover_sheets()
+
+    assert [item["name"] for item in sheets] == [
+        "纯粹-加拿大",
+        "CA-FBA",
+        "CA-轨迹明细",
+    ]
+    argv = session.calls[0][1]["json"]["Context"]["argv"]
+    assert argv["action"] == "discover"
+    assert argv["sheet_name"] == "CA-FBA"
+    assert argv["detail_sheet_name"] == "CA-轨迹明细"
+
+
 def test_validate_accepts_json_string_result():
     result = json.dumps(
         {
             "success": True,
-            "schemaVersion": 5,
+            "schemaVersion": 8,
             "detailSheetName": "US-轨迹明细",
             "sheetName": "US-FBA",
             "columns": {
@@ -253,11 +292,24 @@ def test_rich_sync_sends_snapshot_and_deduplicated_event_payload():
                     {
                         "success": True,
                         "updated": ["FBA11111"],
+                        "auditOnly": ["FBA22222"],
                         "unchanged": [],
                         "notInSheet": [],
                         "duplicateRows": [],
                         "failures": [],
                         "conflicts": ["FBA11111：到港"],
+                        "updatedCells": [
+                            {
+                                "fba": "FBA11111",
+                                "row": 8,
+                                "address": "M8",
+                                "field": "actual_arrival",
+                                "header": "到港",
+                                "oldValue": "2026-07-19",
+                                "newValue": "2026-07-20",
+                            }
+                        ],
+                        "formatFailures": ["FBA11111：M8（设置本次更新高亮失败）"],
                         "eventsAdded": 1,
                         "eventsUpdated": 2,
                         "eventsUnchanged": 3,
@@ -299,9 +351,18 @@ def test_rich_sync_sends_snapshot_and_deduplicated_event_payload():
     assert argv["items"][0]["main"]["route"] == "2026-07-20 10:00 已到港"
     assert argv["items"][0]["events"][0]["event_id"] == "event-1"
     assert summary.conflicts == ["FBA11111：到港"]
+    assert summary.audit_only == ["FBA22222"]
+    assert summary.updated_cells[0].address == "M8"
+    assert summary.updated_cells[0].header == "到港"
+    assert summary.updated_cells[0].old_value == "2026-07-19"
+    assert summary.updated_cells[0].new_value == "2026-07-20"
+    assert summary.format_failures == ["FBA11111：M8（设置本次更新高亮失败）"]
+    assert "1 个单元格" in summary.message
+    assert "仅刷新查询时间 1" in summary.message
     assert summary.events_added == 1
     assert summary.events_updated == 2
     assert summary.events_unchanged == 3
+    assert "实际更新 2，无变化 3" in summary.message
 
 
 def test_rich_sync_batches_are_kept_small():

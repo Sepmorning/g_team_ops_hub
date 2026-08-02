@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const HEADER_END_COLUMN = "CZ";
 const MAX_HEADER_ROW = 12;
 const MAX_SCAN_ROW = 20000;
@@ -189,6 +189,19 @@ function findTargetSheet(sheetName) {
         throw new Error("存在多个同名Listing子表：" + sheetName);
     }
     return matches[0];
+}
+
+function workbookSheets() {
+    const sheets = Application.Sheets;
+    const result = [];
+    for (let index = 1; index <= sheets.Count; index++) {
+        const sheet = sheets.Item(index);
+        result.push({
+            id: displayText(sheet.Id),
+            name: displayText(sheet.Name)
+        });
+    }
+    return result;
 }
 
 function headersAtRow(sheet, rowNumber) {
@@ -406,11 +419,20 @@ const sheetName = displayText(argv.sheet_name);
 const dataDate = normalizedDate(argv.data_date);
 const items = Array.isArray(argv.items) ? argv.items : [];
 
+if (action !== "discover" && action !== "validate" && action !== "sync") {
+    throw new Error("不支持的Listing操作：" + action);
+}
+if (action === "discover") {
+    const discoveryResult = {
+        success: true,
+        schemaVersion: SCHEMA_VERSION,
+        sheets: workbookSheets()
+    };
+    console.log(JSON.stringify(discoveryResult));
+    return discoveryResult;
+}
 if (sheetName === "") {
     throw new Error("未提供Listing子表名称");
-}
-if (action !== "validate" && action !== "sync") {
-    throw new Error("不支持的Listing操作：" + action);
 }
 if (items.length > MAX_ITEMS) {
     throw new Error("单次最多处理" + MAX_ITEMS + "个Listing");

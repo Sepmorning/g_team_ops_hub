@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from ..airscript import AirScriptClient, AirScriptConfig
+from ..airscript import AirScriptClient, AirScriptConfig, parse_share_file_id
 from ..auth import UserAccount, UserRepository
 from ..client import AndaClient
 from ..errors import CarrierError, ConfigurationError
@@ -29,6 +29,7 @@ from ..listing import (
 )
 from ..parser import parse_fba_input
 from ..storage import ProjectDatabase, protect_secret, unprotect_secret
+from ..sites import discover_sites, listing_prefixes, normalize_sheet_name
 from .services import (
     CaptchaRegistry,
     CarrierConnectionStatus,
@@ -175,6 +176,52 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             shop,
             country,
         )
+
+    def logistics_config(
+        database: ProjectDatabase, shop_id: str, country_id: str
+    ) -> tuple[AirScriptConfig, Any, Any]:
+        shop = database.get_shop(shop_id)
+        if shop is None:
+            raise ConfigurationError("店铺不存在或不属于当前用户")
+        if not shop.config.webhook_url or not shop.config.api_token:
+            raise ConfigurationError("该店铺尚未配置FBA物流AirScript")
+        country = database.get_shop_country(country_id)
+        if country is None or country.shop_id != shop_id:
+            raise ConfigurationError("国家站点不存在或不属于当前店铺")
+        if not country.fba_sheet_name or not country.detail_sheet_name:
+            raise ConfigurationError("该国家站点尚未配置FBA主表和轨迹明细表")
+        return (
+            AirScriptConfig(
+                share_url=shop.config.share_url,
+                webhook_url=shop.config.webhook_url,
+                api_token=shop.config.api_token,
+                sheet_name=country.fba_sheet_name,
+                detail_sheet_name=country.detail_sheet_name,
+            ),
+            shop,
+            country,
+        )
+
+    def site_payload(database: ProjectDatabase, item: Any) -> dict[str, Any]:
+        listing_connection = database.load_listing_connection(item.shop_id)
+        shop = database.get_shop(item.shop_id)
+        return {
+            "id": item.id,
+            "country_code": item.country_code,
+            "country_name": item.country_name,
+            "sheet_name": item.sheet_name,
+            "listing_sheet_name": item.sheet_name,
+            "fba_sheet_name": item.fba_sheet_name,
+            "detail_sheet_name": item.detail_sheet_name,
+            "listing_ready": bool(listing_connection and item.sheet_name),
+            "tracking_ready": bool(
+                shop
+                and shop.config.webhook_url
+                and shop.config.api_token
+                and item.fba_sheet_name
+                and item.detail_sheet_name
+            ),
+        }
 
     @app.get("/health")
     async def health():
@@ -445,13 +492,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         airscript_config = None
         if sync_wps:
             shop_id = str(payload.get("shop_id") or "")
-            if not shop_id:
-                return _json_error("勾选更新共享表时必须先选择店铺")
+            country_id = str(payload.get("country_id") or "")
+            if not shop_id or not country_id:
+                return _json_error("勾选更新共享表时必须先选择店铺和国家站点")
             database = ProjectDatabase(database_path, profile_id=account.id)
-            shop = database.get_shop(shop_id)
-            if shop is None:
-                return _json_error("所选店铺不存在或不属于当前用户", 404)
-            airscript_config = shop.config
+            try:
+                airscript_config, _shop, _site = logistics_config(
+                    database, shop_id, country_id
+                )
+            except ConfigurationError as exc:
+                return _json_error(exc.user_message)
         try:
             response = await asyncio.to_thread(
                 coordinator.query,
@@ -649,15 +699,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         token = str(payload.get("api_token") or "")
         if not token and existing:
             token = existing.config.api_token
+        webhook_url = str(payload.get("webhook_url") or "").strip()
+        if not webhook_url and existing:
+            webhook_url = existing.config.webhook_url
+        share_url = str(payload.get("share_url") or "").strip()
         config = AirScriptConfig(
-            str(payload.get("share_url") or ""),
-            str(payload.get("webhook_url") or ""),
+            share_url,
+            webhook_url,
             token,
         )
         try:
-            binding = await asyncio.to_thread(
-                AirScriptClient(config, retries=coordinator.settings.retries).validate
-            )
+            parse_share_file_id(share_url)
             shop = database.save_shop(
                 str(payload.get("name") or ""), config, shop_id=shop_id
             )
@@ -666,11 +718,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return {
             "ok": True,
             "shop_id": shop.id,
-            "message": (
-                f"店铺已保存；{binding.sheet_name}的FBA列{binding.fba_column}，"
-                f"货代列{binding.carrier_column}，是否完成列{binding.completion_column}，"
-                f"路由列{binding.route_column}"
-            ),
+            "message": "店铺名称和共享表链接已保存；请在店铺中配置模块脚本并扫描国家站点",
         }
 
     @app.delete("/api/shops/{shop_id}")
@@ -710,6 +758,361 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             ),
         }
 
+    @app.get("/api/shops/{shop_id}/config")
+    async def shop_config_api(shop_id: str, request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        shop = database.get_shop(shop_id)
+        if shop is None:
+            return _json_error("店铺不存在或不属于当前用户", 404)
+        listing_connection = database.load_listing_connection(shop_id)
+        sites = database.list_shop_countries(shop_id)
+        return {
+            "ok": True,
+            "shop": {
+                "id": shop.id,
+                "name": shop.name,
+                "share_url": shop.config.share_url,
+                "listing_prefix": shop.listing_prefix,
+            },
+            "connections": {
+                "tracking": {
+                    "configured": bool(
+                        shop.config.webhook_url and shop.config.api_token
+                    ),
+                    "webhook_url": shop.config.webhook_url,
+                },
+                "listing": {
+                    "configured": bool(listing_connection),
+                    "webhook_url": (
+                        listing_connection.webhook_url
+                        if listing_connection
+                        else ""
+                    ),
+                    "updated_at": (
+                        listing_connection.updated_at if listing_connection else ""
+                    ),
+                },
+            },
+            "sites": [site_payload(database, item) for item in sites],
+        }
+
+    @app.post("/api/shops/{shop_id}/logistics-connection")
+    async def save_logistics_connection_api(shop_id: str, request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await json_payload(request)
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        shop = database.get_shop(shop_id)
+        if shop is None:
+            return _json_error("店铺不存在或不属于当前用户", 404)
+        webhook_url = str(payload.get("webhook_url") or "").strip()
+        token = str(payload.get("api_token") or "") or shop.config.api_token
+        config = AirScriptConfig(
+            share_url=shop.config.share_url,
+            webhook_url=webhook_url,
+            api_token=token,
+        )
+        try:
+            sheets = await asyncio.to_thread(
+                AirScriptClient(
+                    config, retries=coordinator.settings.retries
+                ).discover_sheets
+            )
+            database.save_shop(shop.name, config, shop_id=shop.id)
+        except (CarrierError, ConfigurationError) as exc:
+            return _json_error(exc.user_message)
+        return {
+            "ok": True,
+            "message": f"FBA物流脚本已连接，共读取到{len(sheets)}个子表",
+            "sheet_count": len(sheets),
+        }
+
+    @app.post("/api/shops/{shop_id}/sites")
+    async def save_shop_site_api(shop_id: str, request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await json_payload(request)
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        if database.get_shop(shop_id) is None:
+            return _json_error("店铺不存在或不属于当前用户", 404)
+        try:
+            site = database.save_shop_country(
+                shop_id,
+                str(payload.get("country_name") or ""),
+                str(
+                    payload.get("listing_sheet_name")
+                    or payload.get("sheet_name")
+                    or ""
+                ),
+                country_id=str(payload.get("id") or "").strip() or None,
+                country_code=str(payload.get("country_code") or ""),
+                fba_sheet_name=str(payload.get("fba_sheet_name") or ""),
+                detail_sheet_name=str(payload.get("detail_sheet_name") or ""),
+            )
+        except ConfigurationError as exc:
+            return _json_error(exc.user_message)
+        return {
+            "ok": True,
+            "site": site_payload(database, site),
+            "message": "国家站点映射已保存；使用模块前可分别测试Listing和物流连接",
+        }
+
+    @app.post("/api/shops/{shop_id}/sites/{site_id}/validation")
+    async def validate_shop_site_api(
+        shop_id: str, site_id: str, request: Request
+    ):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await json_payload(request)
+        module = str(payload.get("module") or "").strip().lower()
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        try:
+            if module == "listing":
+                config, _shop, _site = listing_config(
+                    database, shop_id, site_id
+                )
+                binding = await asyncio.to_thread(
+                    ListingAirScriptClient(
+                        config, retries=coordinator.settings.retries
+                    ).validate
+                )
+                message = (
+                    f"Listing已连接“{binding.sheet_name}”，"
+                    f"表头位于第{binding.header_row}行"
+                )
+            elif module == "tracking":
+                config, _shop, _site = logistics_config(
+                    database, shop_id, site_id
+                )
+                binding = await asyncio.to_thread(
+                    AirScriptClient(
+                        config, retries=coordinator.settings.retries
+                    ).validate
+                )
+                message = (
+                    f"物流已连接“{binding.sheet_name}”和"
+                    f"“{binding.detail_sheet_name}”"
+                )
+            else:
+                return _json_error("module必须是listing或tracking")
+        except (CarrierError, ConfigurationError) as exc:
+            return _json_error(exc.user_message)
+        return {"ok": True, "message": message}
+
+    @app.post("/api/shops/{shop_id}/discover-sites")
+    async def discover_shop_sites_api(shop_id: str, request: Request):
+        account = require_api_user(request)
+        _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await json_payload(request)
+        database = ProjectDatabase(database_path, profile_id=account.id)
+        shop = database.get_shop(shop_id)
+        if shop is None:
+            return _json_error("店铺不存在或不属于当前用户", 404)
+        listing_connection = database.load_listing_connection(shop_id)
+        discovered_by_module: dict[str, list[dict[str, str]]] = {}
+        errors: list[str] = []
+        if shop.config.webhook_url and shop.config.api_token:
+            try:
+                discovered_by_module["物流"] = await asyncio.to_thread(
+                    AirScriptClient(
+                        shop.config, retries=coordinator.settings.retries
+                    ).discover_sheets
+                )
+            except (CarrierError, ConfigurationError) as exc:
+                errors.append(f"物流脚本：{exc.user_message}")
+        if listing_connection:
+            try:
+                discovered_by_module["Listing"] = await asyncio.to_thread(
+                    ListingAirScriptClient(
+                        ListingConnectionConfig(
+                            share_url=shop.config.share_url,
+                            webhook_url=listing_connection.webhook_url,
+                            api_token=listing_connection.api_token,
+                            sheet_name="扫描工作簿",
+                        ),
+                        retries=coordinator.settings.retries,
+                    ).discover_sheets
+                )
+            except (CarrierError, ConfigurationError) as exc:
+                errors.append(f"Listing脚本：{exc.user_message}")
+        if not discovered_by_module:
+            message = (
+                "没有可用于扫描的模块脚本；" + "；".join(errors)
+                if errors
+                else "请先配置至少一个模块脚本"
+            )
+            return _json_error(message)
+        module_sets = {
+            name: {normalize_sheet_name(item["name"]) for item in sheets}
+            for name, sheets in discovered_by_module.items()
+        }
+        if len(module_sets) > 1:
+            values = list(module_sets.values())
+            if any(value != values[0] for value in values[1:]):
+                return _json_error(
+                    "物流和Listing脚本返回的子表不一致，可能连接了不同工作簿；"
+                    "为避免写错表，已停止自动保存",
+                    409,
+                )
+        sheets = next(iter(discovered_by_module.values()))
+        sheet_names = [item["name"] for item in sheets]
+        available_prefixes = listing_prefixes(sheet_names)
+        available_by_normalized = {
+            normalize_sheet_name(prefix): prefix for prefix in available_prefixes
+        }
+        confirmed_prefix = str(
+            payload.get("confirm_listing_prefix") or ""
+        ).strip()
+        reset_prefix = payload.get("reset_listing_prefix") is True
+        active_prefix = "" if reset_prefix else shop.listing_prefix
+        if confirmed_prefix:
+            matched_prefix = available_by_normalized.get(
+                normalize_sheet_name(confirmed_prefix)
+            )
+            if not matched_prefix:
+                return _json_error(
+                    "确认的Listing前缀不在本次扫描结果中，请重新扫描",
+                    409,
+                )
+            shop = database.save_shop_listing_prefix(shop_id, matched_prefix)
+            active_prefix = shop.listing_prefix
+        elif active_prefix:
+            matched_prefix = available_by_normalized.get(
+                normalize_sheet_name(active_prefix)
+            )
+            if not matched_prefix:
+                return {
+                    "ok": True,
+                    "confirmation_required": True,
+                    "message": (
+                        f"已保存的Listing前缀“{active_prefix}”在本次扫描中不存在；"
+                        "为避免写错表，未更新站点映射"
+                    ),
+                    "listing_prefix": active_prefix,
+                    "available_listing_prefixes": available_prefixes,
+                    "warnings": list(dict.fromkeys(errors)),
+                    "candidates": [],
+                    "sites": [
+                        site_payload(database, item)
+                        for item in database.list_shop_countries(shop_id)
+                    ],
+                }
+            active_prefix = matched_prefix
+        else:
+            exact_prefix = available_by_normalized.get(
+                normalize_sheet_name(shop.name)
+            )
+            if exact_prefix:
+                shop = database.save_shop_listing_prefix(
+                    shop_id, exact_prefix
+                )
+                active_prefix = shop.listing_prefix
+            elif available_prefixes:
+                detected_message = (
+                    f"检测到唯一Listing子表前缀“{available_prefixes[0]}”，"
+                    f"与店铺显示名称“{shop.name}”不同，请确认是否绑定"
+                    if len(available_prefixes) == 1
+                    else "检测到多个Listing子表前缀，请选择当前店铺使用的前缀"
+                )
+                return {
+                    "ok": True,
+                    "confirmation_required": True,
+                    "message": detected_message,
+                    "listing_prefix": "",
+                    "available_listing_prefixes": available_prefixes,
+                    "warnings": list(dict.fromkeys(errors)),
+                    "candidates": [],
+                    "sites": [
+                        site_payload(database, item)
+                        for item in database.list_shop_countries(shop_id)
+                    ],
+                }
+            else:
+                return {
+                    "ok": True,
+                    "confirmation_required": False,
+                    "message": (
+                        f"扫描到{len(sheets)}个子表，但没有识别到“前缀-国家”"
+                        "格式的Listing子表"
+                    ),
+                    "listing_prefix": "",
+                    "available_listing_prefixes": [],
+                    "warnings": list(dict.fromkeys(errors)),
+                    "candidates": [],
+                    "sites": [
+                        site_payload(database, item)
+                        for item in database.list_shop_countries(shop_id)
+                    ],
+                }
+
+        candidates = discover_sites(
+            shop.name,
+            sheet_names,
+            listing_prefix=active_prefix,
+        )
+        existing = database.list_shop_countries(shop_id)
+        saved_count = 0
+        discovery_warnings = list(errors)
+        for candidate in candidates:
+            discovery_warnings.extend(candidate.warnings)
+            if not candidate.listing_sheet_name:
+                continue
+            current = next(
+                (
+                    item
+                    for item in existing
+                    if item.country_code == candidate.country_code
+                    or item.country_name == candidate.country_name
+                ),
+                None,
+            )
+            try:
+                database.save_shop_country(
+                    shop_id,
+                    candidate.country_name,
+                    candidate.listing_sheet_name,
+                    country_id=current.id if current else None,
+                    country_code=candidate.country_code,
+                    fba_sheet_name=(
+                        candidate.fba_sheet_name
+                        or (current.fba_sheet_name if current else "")
+                    ),
+                    detail_sheet_name=(
+                        candidate.detail_sheet_name
+                        or (current.detail_sheet_name if current else "")
+                    ),
+                )
+                saved_count += 1
+            except ConfigurationError as exc:
+                discovery_warnings.append(
+                    f"{candidate.country_name}站点未自动保存：{exc.user_message}"
+                )
+        sites = database.list_shop_countries(shop_id)
+        return {
+            "ok": True,
+            "confirmation_required": False,
+            "message": (
+                f"扫描到{len(sheets)}个子表，已保存或更新{saved_count}个明确站点映射"
+            ),
+            "listing_prefix": active_prefix,
+            "available_listing_prefixes": available_prefixes,
+            "warnings": list(dict.fromkeys(discovery_warnings)),
+            "candidates": [
+                {
+                    "country_code": item.country_code,
+                    "country_name": item.country_name,
+                    "listing_sheet_name": item.listing_sheet_name,
+                    "fba_sheet_name": item.fba_sheet_name,
+                    "detail_sheet_name": item.detail_sheet_name,
+                    "warnings": item.warnings,
+                }
+                for item in candidates
+            ],
+            "sites": [site_payload(database, item) for item in sites],
+        }
+
     @app.get("/api/inventory/config")
     async def inventory_config_api(request: Request):
         account = require_api_user(request)
@@ -731,18 +1134,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "connection": (
                 {
                     "configured": True,
-                    "webhook_url": connection.webhook_url,
                     "updated_at": connection.updated_at,
                 }
                 if connection
-                else {"configured": False, "webhook_url": "", "updated_at": ""}
+                else {"configured": False, "updated_at": ""}
             ),
             "countries": [
-                {
-                    "id": item.id,
-                    "country_name": item.country_name,
-                    "sheet_name": item.sheet_name,
-                }
+                site_payload(database, item)
                 for item in countries
             ],
         }
@@ -762,22 +1160,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             token = existing.api_token
         webhook_url = str(payload.get("webhook_url") or "")
         try:
-            # 构造客户端只执行格式与共享链接校验；添加国家时再连接实际子表。
-            ListingAirScriptClient(
+            sheets = await asyncio.to_thread(
+                ListingAirScriptClient(
                 ListingConnectionConfig(
                     share_url=shop.config.share_url,
                     webhook_url=webhook_url,
                     api_token=token,
-                    sheet_name="待选择Listing子表",
+                    sheet_name="扫描工作簿",
                 ),
                 retries=coordinator.settings.retries,
+                ).discover_sheets
             )
             database.save_listing_connection(shop_id, webhook_url, token)
         except (CarrierError, ConfigurationError) as exc:
             return _json_error(exc.user_message)
         return {
             "ok": True,
-            "message": "独立Listing AirScript连接已加密保存；请添加国家并验证对应子表",
+            "message": f"Listing脚本已连接，共读取到{len(sheets)}个子表",
+            "sheet_count": len(sheets),
         }
 
     @app.post("/api/shops/{shop_id}/countries")
@@ -1002,12 +1402,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     async def query_pending_shop_api(shop_id: str, request: Request):
         account = require_api_user(request)
         _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await json_payload(request)
+        country_id = str(payload.get("country_id") or "").strip()
         database = ProjectDatabase(database_path, profile_id=account.id)
-        shop = database.get_shop(shop_id)
-        if shop is None:
-            return _json_error("店铺不存在或不属于当前用户", 404)
+        try:
+            config, shop, country = logistics_config(
+                database, shop_id, country_id
+            )
+        except ConfigurationError as exc:
+            return _json_error(exc.user_message)
 
-        client = AirScriptClient(shop.config, retries=coordinator.settings.retries)
+        client = AirScriptClient(config, retries=coordinator.settings.retries)
         try:
             pending_items = await asyncio.to_thread(
                 client.list_pending_tracking_items
@@ -1059,7 +1464,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 coordinator.query_routed,
                 account.id,
                 pending_items,
-                shop.config,
+                config,
             )
         except (CarrierError, ConfigurationError) as exc:
             return _json_error(exc.user_message)
@@ -1069,6 +1474,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return {
             "ok": True,
             "message": (
+                f"{shop.name} / {country.country_name}："
                 f"已按共享表货代列定向查询 {len(pending_items)} 个待更新FBA"
             ),
             "carrier_statuses": status_payload,
