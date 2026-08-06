@@ -3,7 +3,11 @@ import re
 from fastapi.testclient import TestClient
 
 from anda_tracker.models import QueryStatus, TrackingResult
-from anda_tracker.airscript import AirScriptConfig, PendingTrackingItem
+from anda_tracker.airscript import (
+    AirScriptConfig,
+    AirScriptSyncSummary,
+    PendingTrackingItem,
+)
 from anda_tracker.errors import NetworkError
 from anda_tracker.storage import ProjectDatabase
 from anda_tracker.web.app import create_app
@@ -463,6 +467,60 @@ def test_automatic_shop_task_reads_pending_then_queries_and_syncs(tmp_path, monk
         assert called["config"].api_token == "store-token"
         assert called["config"].sheet_name == "US-FBA"
         assert called["config"].detail_sheet_name == "US-轨迹明细"
+
+
+def test_automatic_shop_task_cleans_details_when_no_pending_fba(
+    tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "data"
+    app = create_app(data_dir)
+    with TestClient(app) as client:
+        csrf = bootstrap_and_login(client)
+        account = app.state.users.list_users()[0]
+        database = ProjectDatabase(data_dir / "app.db", account.id)
+        shop = database.save_shop(
+            "测试店铺",
+            AirScriptConfig(
+                "https://www.kdocs.cn/l/store",
+                "https://www.kdocs.cn/api/v3/ide/file/f/script/s/sync_task",
+                "store-token",
+            ),
+        )
+        site = database.save_shop_country(
+            shop.id,
+            "美国",
+            "测试店铺-美国",
+            country_code="US",
+            fba_sheet_name="US-FBA",
+            detail_sheet_name="US-轨迹明细",
+        )
+        calls = []
+
+        class FakeAirScriptClient:
+            def __init__(self, _config, retries=0):
+                pass
+
+            def list_pending_tracking_items(self):
+                return []
+
+            def sync_tracking_results(self, results):
+                calls.append(results)
+                return AirScriptSyncSummary(detail_rows_removed=7)
+
+        monkeypatch.setattr(
+            "anda_tracker.web.app.AirScriptClient", FakeAirScriptClient
+        )
+        response = client.post(
+            f"/api/shops/{shop.id}/tracking-sync",
+            headers={"X-CSRF-Token": csrf},
+            json={"country_id": site.id},
+        )
+
+        assert response.status_code == 200
+        assert calls == [[]]
+        assert response.json()["pending_count"] == 0
+        assert response.json()["wps"]["detail_rows_removed"] == 7
+        assert "明细清理 7 行" in response.json()["wps"]["message"]
 
 
 def test_shop_discovery_saves_sites_with_one_stable_listing_prefix(

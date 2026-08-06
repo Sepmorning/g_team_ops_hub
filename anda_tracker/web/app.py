@@ -1345,6 +1345,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "duplicate_mskus": list(parsed.duplicate_mskus),
             "skipped_rows": list(parsed.skipped_rows),
             "ignored_headers": list(parsed.ignored_headers),
+            "discount_price": {
+                "source_present": parsed.has_discount_price,
+                "target_present": "discount_price" in binding.columns,
+                "will_update": (
+                    parsed.has_discount_price
+                    and "discount_price" in binding.columns
+                ),
+            },
             "sample": [item.preview_dict() for item in parsed.rows[:30]],
         }
 
@@ -1420,13 +1428,27 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except (CarrierError, ConfigurationError) as exc:
             return _json_error(exc.user_message)
         if not pending_items:
+            try:
+                cleanup_summary = await asyncio.to_thread(
+                    client.sync_tracking_results, []
+                )
+            except (CarrierError, ConfigurationError) as exc:
+                return {
+                    "ok": True,
+                    "message": "共享表中没有需要查询的FBA，但轨迹明细清理失败",
+                    "carrier_statuses": [],
+                    "pending_count": 0,
+                    "results": [],
+                    "wps": None,
+                    "wps_error": exc.user_message,
+                }
             return {
                 "ok": True,
-                "message": "共享表中没有需要查询的FBA",
+                "message": "共享表中没有需要查询的FBA，已检查轨迹明细",
                 "carrier_statuses": [],
                 "pending_count": 0,
                 "results": [],
-                "wps": None,
+                "wps": summary_dict(cleanup_summary),
                 "wps_error": "",
             }
 

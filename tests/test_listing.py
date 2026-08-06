@@ -155,6 +155,40 @@ def test_listing_export_preserves_blank_inventory_but_keeps_zero_sales():
     payload = row.to_payload()
     assert "fba_available" not in payload
     assert payload["sales_7d"] == 0
+    assert "discount_price" not in payload
+
+
+def test_optional_discount_price_is_parsed_and_blank_clears_old_value():
+    # 领星列顺序可能变化；倒序标准列并把优惠价插入中间验证按表头定位。
+    headers = list(reversed(SOURCE_HEADERS))
+    headers.insert(4, "优惠价")
+    priced = source_row(**{"优惠价": 15.99})
+    blank = source_row(**{"MSKU": "SKU-2", "优惠价": None})
+    parsed = parse_listing_export(
+        build_listing_xlsx(
+            headers,
+            [
+                [priced[item] for item in headers],
+                [blank[item] for item in headers],
+            ],
+        )
+    )
+
+    assert parsed.has_discount_price is True
+    assert "优惠价" not in parsed.ignored_headers
+    assert parsed.rows[0].discount_price == 15.99
+    assert parsed.rows[0].to_payload()["discount_price"] == 15.99
+    assert parsed.rows[1].discount_price is None
+    assert parsed.rows[1].to_payload()["discount_price"] == ""
+
+
+def test_duplicate_optional_discount_header_is_rejected():
+    headers = [*SOURCE_HEADERS, "优惠价", " 优惠价 "]
+    values = source_row(**{"优惠价": 15.99, " 优惠价 ": 14.99})
+    with pytest.raises(ConfigurationError, match="优惠价"):
+        parse_listing_export(
+            build_listing_xlsx(headers, [[values[item] for item in headers]])
+        )
 
 
 def test_listing_export_rejects_missing_stable_header():

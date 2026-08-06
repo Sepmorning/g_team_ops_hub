@@ -24,7 +24,7 @@ TARGET_SHEET_NAME = "US-FBA"
 DEFAULT_DETAIL_SHEET_NAME = "US-轨迹明细"
 AIRSCRIPT_WRITE_BATCH_SIZE = 50
 AIRSCRIPT_RICH_WRITE_BATCH_SIZE = 10
-REQUIRED_AIRSCRIPT_SCHEMA_VERSION = 8
+REQUIRED_AIRSCRIPT_SCHEMA_VERSION = 10
 
 
 def parse_share_file_id(share_url: str) -> str:
@@ -91,6 +91,7 @@ class AirScriptSyncSummary:
     events_added: int = 0
     events_updated: int = 0
     events_unchanged: int = 0
+    detail_rows_removed: int = 0
 
     @property
     def message(self) -> str:
@@ -113,6 +114,8 @@ class AirScriptSyncSummary:
                 f"明细新增 {self.events_added}，实际更新 {self.events_updated}，"
                 f"无变化 {self.events_unchanged}"
             )
+        if self.detail_rows_removed:
+            parts.append(f"明细清理 {self.detail_rows_removed} 行")
         return "，".join(parts)
 
 
@@ -412,6 +415,12 @@ class AirScriptClient:
                 item["events"] = [event.to_dict() for event in result.events]
             items.append(item)
         if not items:
+            # 即使本次全部查询失败或主表已无活跃FBA，也要安全清理已完成货件明细。
+            result = self._execute("sync_tracking", [])
+            self._require_schema(result)
+            summary.detail_rows_removed += int(
+                result.get("detailRowsRemoved") or 0
+            )
             return summary
         rich = any("main" in item for item in items)
         write_batch_size = (
@@ -450,4 +459,7 @@ class AirScriptClient:
             summary.events_added += int(result.get("eventsAdded") or 0)
             summary.events_updated += int(result.get("eventsUpdated") or 0)
             summary.events_unchanged += int(result.get("eventsUnchanged") or 0)
+            summary.detail_rows_removed += int(
+                result.get("detailRowsRemoved") or 0
+            )
         return summary

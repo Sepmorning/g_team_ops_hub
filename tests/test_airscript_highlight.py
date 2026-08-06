@@ -66,7 +66,28 @@ class FakeSheet {
         return this._cell(parsed.row, parsed.column);
     }
 
+    _deleteRows(startRow, endRow) {
+        const count = endRow - startRow + 1;
+        const shifted = new Map();
+        for (const [key, cell] of this._cells.entries()) {
+            const [rowText, columnText] = key.split(":");
+            const row = Number(rowText);
+            const column = Number(columnText);
+            if (row < startRow) {
+                shifted.set(key, cell);
+            } else if (row > endRow) {
+                shifted.set((row - count) + ":" + column, cell);
+            }
+        }
+        this._cells = shifted;
+        this.UsedRange.Rows.Count = Math.max(
+            1,
+            this.UsedRange.Rows.Count - count
+        );
+    }
+
     Range(address) {
+        const sheet = this;
         const parts = address.split(":");
         const start = cellAddress(parts[0]);
         const end = cellAddress(parts[1] || parts[0]);
@@ -133,6 +154,9 @@ class FakeSheet {
             }
         });
         range.Interior = interior;
+        range.EntireRow = {
+            Delete() { sheet._deleteRows(start.row, end.row); }
+        };
         return range;
     }
 }
@@ -249,10 +273,22 @@ const detailExistingRow = [
     excelSerial(detailTimestamp), excelSerial(detailTimestamp),
     excelSerial(detailTimestamp)
 ];
-const compareMainSheet = new FakeSheet("US-FBA", [mainHeaders, detailMainRow]);
+const compareMainSheet = new FakeSheet("US-FBA", [
+    mainHeaders,
+    detailMainRow,
+    pendingRow("FBA77777", "", ""),
+    pendingRow("FBA99999", "是", "")
+]);
 const compareDetailSheet = new FakeSheet(
     "US-轨迹明细",
-    [detailHeaders, detailExistingRow]
+    [
+        detailHeaders,
+        detailExistingRow,
+        ["event-active-failed", "FBA77777", "安达", "", "", "", "", "", "旧轨迹"],
+        ["event-completed", "FBA99999", "安达", "", "", "", "", "", "已完成轨迹"],
+        ["event-orphan", "FBA88888", "安达", "", "", "", "", "", "已移除货件"],
+        ["manual-note", "说明", "", "", "", "", "", "", "人工说明行"]
+    ]
 );
 const compareSheets = [compareMainSheet, compareDetailSheet];
 const compareApplication = {
@@ -303,6 +339,11 @@ const detailDatesAfterChanged = {
     lastConfirmed: compareDetailSheet.cell("P2").value,
     updatedAt: compareDetailSheet.cell("Q2").value
 };
+const detailFbasAfterCleanup = [
+    compareDetailSheet.cell("B2").value,
+    compareDetailSheet.cell("B3").value,
+    compareDetailSheet.cell("B4").value
+];
 console.log(JSON.stringify({
     first,
     firstStyles: firstStyleSnapshot,
@@ -315,6 +356,7 @@ console.log(JSON.stringify({
     pending,
     detailSame,
     detailChanged,
+    detailFbasAfterCleanup,
     detailDatesAfterSame,
     detailDatesAfterChanged
 }));
@@ -328,7 +370,7 @@ console.log(JSON.stringify({
     )
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
 
-    assert payload["first"]["schemaVersion"] == 9
+    assert payload["first"]["schemaVersion"] == 10
     assert payload["first"]["updated"] == ["FBA12345"]
     assert payload["first"]["auditOnly"] == []
     assert payload["first"]["formatFailures"] == []
@@ -356,8 +398,15 @@ console.log(JSON.stringify({
     ]
     assert payload["detailSame"]["eventsUpdated"] == 0
     assert payload["detailSame"]["eventsUnchanged"] == 1
+    assert payload["detailSame"]["detailRowsRemoved"] == 2
     assert payload["detailChanged"]["eventsUpdated"] == 1
     assert payload["detailChanged"]["eventsUnchanged"] == 0
+    assert payload["detailChanged"]["detailRowsRemoved"] == 0
+    assert payload["detailFbasAfterCleanup"] == [
+        "FBA12345",
+        "FBA77777",
+        "说明",
+    ]
     assert isinstance(payload["detailDatesAfterSame"]["lastConfirmed"], (int, float))
     assert isinstance(payload["detailDatesAfterSame"]["updatedAt"], (int, float))
     assert isinstance(

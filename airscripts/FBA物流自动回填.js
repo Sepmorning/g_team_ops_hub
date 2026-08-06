@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 const DEFAULT_SHEET_NAME = "US-FBA";
 const DEFAULT_DETAIL_SHEET_NAME = "US-轨迹明细";
 const HEADER_END_COLUMN = "CV";
@@ -549,6 +549,78 @@ function buildRowsByFba(sheet, columns, lastRow) {
     return result;
 }
 
+function activeFbasFromMain(sheet, columns, lastRow) {
+    const result = Object.create(null);
+    if (lastRow < 2) {
+        return result;
+    }
+    const fbaValues = singleColumnValues(
+        sheet.Range(
+            columns.fba.columnLetter + "2:" +
+            columns.fba.columnLetter + lastRow
+        ).Value2
+    );
+    const completionValues = singleColumnValues(
+        sheet.Range(
+            columns.completion.columnLetter + "2:" +
+            columns.completion.columnLetter + lastRow
+        ).Value2
+    );
+    for (let index = 0; index < fbaValues.length; index++) {
+        const fba = normalizeFba(fbaValues[index]);
+        // 与一键查询保持同一口径：只有“是否完成”为空才属于活跃货件。
+        if (
+            isValidFba(fba) &&
+            normalizeText(completionValues[index]) === ""
+        ) {
+            result[fba] = true;
+        }
+    }
+    return result;
+}
+
+function removeInactiveDetailRows(
+    mainSheet,
+    mainColumns,
+    mainLastRow,
+    detailSheet,
+    detailColumns
+) {
+    const activeFbas = activeFbasFromMain(
+        mainSheet,
+        mainColumns,
+        mainLastRow
+    );
+    const detailLastRow = lastUsedRow(detailSheet, detailSheet.Name);
+    if (detailLastRow < 2) {
+        return 0;
+    }
+    const detailFbas = singleColumnValues(
+        detailSheet.Range(
+            detailColumns.fba.columnLetter + "2:" +
+            detailColumns.fba.columnLetter + detailLastRow
+        ).Value2
+    );
+    const removableRows = [];
+    for (let index = 0; index < detailFbas.length; index++) {
+        const fba = normalizeFba(detailFbas[index]);
+        // 无FBA或格式异常的说明/自定义行不自动删除。
+        if (isValidFba(fba) && !activeFbas[fba]) {
+            removableRows.push(index + 2);
+        }
+    }
+    const ranges = consecutiveRowRanges(removableRows);
+    // 从底部删除，避免前面的行号因上移而失效。
+    for (let index = ranges.length - 1; index >= 0; index--) {
+        const rowRange = ranges[index];
+        detailSheet.Range(
+            detailColumns.fba.columnLetter + rowRange.start + ":" +
+            detailColumns.fba.columnLetter + rowRange.end
+        ).EntireRow.Delete();
+    }
+    return removableRows.length;
+}
+
 function mainColumnBounds(columns) {
     let minimum = columns.fba.columnNumber;
     let maximum = columns.fba.columnNumber;
@@ -1040,6 +1112,16 @@ const updatedCells = [];
 const formatFailures = [];
 
 if (items.length === 0) {
+    let detailRowsRemoved = 0;
+    if (action === "sync_tracking") {
+        detailRowsRemoved = removeInactiveDetailRows(
+            targetSheet,
+            columns,
+            lastRow,
+            detailSheet,
+            detailColumns
+        );
+    }
     return Object.assign(baseResult, {
         updated: updated,
         auditOnly: auditOnly,
@@ -1052,7 +1134,8 @@ if (items.length === 0) {
         formatFailures: formatFailures,
         eventsAdded: 0,
         eventsUpdated: 0,
-        eventsUnchanged: 0
+        eventsUnchanged: 0,
+        detailRowsRemoved: detailRowsRemoved
     });
 }
 
@@ -1218,6 +1301,7 @@ updatedCells.sort(function (left, right) {
 });
 
 let eventSummary = { added: 0, updated: 0, unchanged: 0 };
+let detailRowsRemoved = 0;
 if (action === "sync_tracking") {
     try {
         eventSummary = syncEvents(
@@ -1234,6 +1318,21 @@ if (action === "sync_tracking") {
             "可重新执行一键更新安全补写。原因：" + error.message
         );
     }
+    try {
+        detailRowsRemoved = removeInactiveDetailRows(
+            targetSheet,
+            columns,
+            lastRow,
+            detailSheet,
+            detailColumns
+        );
+    } catch (error) {
+        throw new Error(
+            "主表和本次轨迹已处理，但清理非活跃FBA明细失败；" +
+            "原有活跃轨迹不会被清空，可重新执行安全补写。原因：" +
+            error.message
+        );
+    }
 }
 
 const result = Object.assign(baseResult, {
@@ -1248,7 +1347,8 @@ const result = Object.assign(baseResult, {
     formatFailures: formatFailures,
     eventsAdded: eventSummary.added,
     eventsUpdated: eventSummary.updated,
-    eventsUnchanged: eventSummary.unchanged
+    eventsUnchanged: eventSummary.unchanged,
+    detailRowsRemoved: detailRowsRemoved
 });
 
 console.log(JSON.stringify(result));

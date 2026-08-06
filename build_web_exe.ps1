@@ -7,7 +7,7 @@ $Templates = Join-Path $ProjectRoot "anda_tracker\web\templates"
 $Static = Join-Path $ProjectRoot "anda_tracker\web\static"
 
 if (-not (Test-Path -LiteralPath $Python)) {
-    throw "请先运行 setup_project.ps1 安装项目环境。"
+    throw "Run setup_project.ps1 to install the project environment first."
 }
 if (Test-Path -LiteralPath $TempRoot) {
     Remove-Item -LiteralPath $TempRoot -Recurse -Force
@@ -28,10 +28,10 @@ try {
         --workpath (Join-Path $TempRoot "work") `
         --specpath $TempRoot `
         web_main.py
-    if ($LASTEXITCODE -ne 0) { throw "网页版EXE打包失败，退出代码：$LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) { throw "Web EXE build failed with exit code: $LASTEXITCODE" }
     Copy-Item -LiteralPath (Join-Path $TempRoot "dist\FbaTrackerWeb.exe") -Destination $OutputExe -Force
 }
 finally { Pop-Location }
 
 Remove-Item -LiteralPath $TempRoot -Recurse -Force
-Write-Host "网页版EXE已生成：$OutputExe"
+Write-Host "Web EXE created: $OutputExe"

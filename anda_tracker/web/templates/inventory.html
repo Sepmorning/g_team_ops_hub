@@ -80,7 +80,7 @@
   <div class="table-wrap">
     <table style="min-width:1180px">
       <thead><tr>
-        <th>MSKU</th><th>ASIN</th><th>评分 / 评论数</th><th>昨日广告费</th>
+        <th>MSKU</th><th>ASIN</th><th>优惠价</th><th>评分 / 评论数</th><th>昨日广告费</th>
         <th>FBA可售</th><th>预留</th><th>在途</th>
         <th>7 / 14 / 30日销量</th><th>系统建议月销</th>
       </tr></thead>
@@ -153,11 +153,14 @@ async function previewListing(button){
     if(data.duplicate_mskus.length)warnings.push(`文件内重复MSKU已跳过：${data.duplicate_mskus.join('、')}`);
     if(data.skipped_rows.length)warnings.push(`无效行已跳过：${data.skipped_rows.join('；')}`);
     if(data.ignored_headers.length)warnings.push(`已忽略新增列：${data.ignored_headers.join('、')}`);
+    if(data.discount_price?.will_update)warnings.push('两份表均已识别“优惠价”，本次将同步；领星空值会清除共享表旧优惠价');
+    else if(data.discount_price?.source_present)warnings.push('领星文件有“优惠价”，但共享表没有该列，本次已忽略优惠价');
+    else if(data.discount_price?.target_present)warnings.push('共享表有“优惠价”，但领星文件没有该列，本次不会修改原优惠价');
     if(warnings.length)FBA.showStatus(previewWarnings,warnings.join('；'),'info');else previewWarnings.className='status';
     previewRows.replaceChildren();
     data.sample.forEach(item=>{
       const tr=document.createElement('tr');
-      const cells=[item.msku,item.asin,`${valueText(item.rating)} / ${valueText(item.review_count)}`,valueText(item.yesterday_ad_spend),valueText(item.fba_available),valueText(item.reserved),valueText(item.inbound),`${valueText(item.sales_7d)} / ${valueText(item.sales_14d)} / ${valueText(item.sales_30d)}`,valueText(item.system_monthly_sales)];
+      const cells=[item.msku,item.asin,valueText(item.discount_price),`${valueText(item.rating)} / ${valueText(item.review_count)}`,valueText(item.yesterday_ad_spend),valueText(item.fba_available),valueText(item.reserved),valueText(item.inbound),`${valueText(item.sales_7d)} / ${valueText(item.sales_14d)} / ${valueText(item.sales_30d)}`,valueText(item.system_monthly_sales)];
       cells.forEach(value=>{const td=document.createElement('td');td.textContent=value;tr.append(td)});previewRows.append(tr);
     });
     previewCard.classList.remove('hidden');previewCard.scrollIntoView({behavior:'smooth'});

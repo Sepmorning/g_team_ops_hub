@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 .build-exe/
 .build-web-exe/
+.build-web-exe-*/
+.exe-smoke-*/
 dist/
 build/
 *.spec

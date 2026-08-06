@@ -33,7 +33,7 @@ MAX_XLSX_ENTRIES = 2_000
 MAX_LISTING_ROWS = 20_000
 LISTING_WRITE_BATCH_SIZE = 50
 LISTING_PREVIEW_TTL_SECONDS = 20 * 60
-REQUIRED_LISTING_SCRIPT_VERSION = 1
+REQUIRED_LISTING_SCRIPT_VERSION = 3
 
 SOURCE_HEADERS = (
     "MSKU",
@@ -54,6 +54,8 @@ SOURCE_HEADERS = (
     "Rating总数",
     "评分",
 )
+
+OPTIONAL_SOURCE_HEADERS = ("优惠价",)
 
 TARGET_HEADERS = (
     "MSKU",
@@ -99,6 +101,8 @@ TARGET_HEADERS = (
     "运营备注",
     "本次更新时间",
 )
+
+OPTIONAL_TARGET_HEADERS = ("优惠价",)
 
 _SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _RELATIONSHIP_NS = (
@@ -169,6 +173,8 @@ class ListingRow:
     sales_14d: int | float | None
     sales_30d: int | float | None
     system_monthly_sales: int | None
+    discount_price: int | float | None = None
+    discount_price_present: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -190,6 +196,11 @@ class ListingRow:
             value = getattr(self, key)
             if value is not None:
                 payload[key] = value
+        if self.discount_price_present:
+            # 有“优惠价”表头但单元格为空，表示当前没有优惠，必须清除共享表旧值。
+            payload["discount_price"] = (
+                self.discount_price if self.discount_price is not None else ""
+            )
         return payload
 
     def preview_dict(self) -> dict[str, Any]:
@@ -207,6 +218,9 @@ class ListingRow:
             "sales_14d": self.sales_14d,
             "sales_30d": self.sales_30d,
             "system_monthly_sales": self.system_monthly_sales,
+            "discount_price": (
+                self.discount_price if self.discount_price_present else None
+            ),
         }
 
 
@@ -220,10 +234,18 @@ class ParsedListingExport:
     skipped_rows: tuple[str, ...] = ()
 
     @property
+    def has_discount_price(self) -> bool:
+        optional = {_normalize_header(item) for item in OPTIONAL_SOURCE_HEADERS}
+        return any(_normalize_header(item) in optional for item in self.headers)
+
+    @property
     def ignored_headers(self) -> tuple[str, ...]:
-        required = {_normalize_header(item) for item in SOURCE_HEADERS}
+        known = {
+            _normalize_header(item)
+            for item in (*SOURCE_HEADERS, *OPTIONAL_SOURCE_HEADERS)
+        }
         return tuple(
-            item for item in self.headers if _normalize_header(item) not in required
+            item for item in self.headers if _normalize_header(item) not in known
         )
 
 
@@ -378,6 +400,9 @@ def _read_xlsx(data: bytes) -> tuple[str, list[tuple[int, list[Any]]]]:
 def parse_listing_export(data: bytes) -> ParsedListingExport:
     sheet_name, worksheet_rows = _read_xlsx(data)
     required = {_normalize_header(item): item for item in SOURCE_HEADERS}
+    optional = {
+        _normalize_header(item): item for item in OPTIONAL_SOURCE_HEADERS
+    }
     header_position = -1
     header_row_number = 0
     header_values: list[Any] = []
@@ -395,6 +420,11 @@ def parse_listing_export(data: bytes) -> ParsedListingExport:
                 for item in required
                 if normalized_values.count(item) > 1
             }
+            duplicates.update(
+                optional[item]
+                for item in optional
+                if normalized_values.count(item) > 1
+            )
             if duplicates:
                 raise ConfigurationError(
                     "领星文件存在重复表头：" + "、".join(sorted(duplicates))
@@ -422,6 +452,14 @@ def parse_listing_export(data: bytes) -> ParsedListingExport:
     def source_value(values: list[Any], header: str) -> Any:
         index = header_map[_normalize_header(header)]
         return values[index] if index < len(values) else None
+
+    def optional_source_value(values: list[Any], header: str) -> Any:
+        index = header_map.get(_normalize_header(header))
+        if index is None:
+            return None
+        return values[index] if index < len(values) else None
+
+    discount_price_present = _normalize_header("优惠价") in header_map
 
     for row_number, values in worksheet_rows[header_position + 1 :]:
         msku = _clean_text(source_value(values, "MSKU"))
@@ -473,6 +511,16 @@ def parse_listing_export(data: bytes) -> ParsedListingExport:
                 system_monthly_sales=calculate_system_monthly_sales(
                     sales_7d, sales_30d
                 ),
+                discount_price=(
+                    _number(
+                        optional_source_value(values, "优惠价"),
+                        "优惠价",
+                        row_number,
+                    )
+                    if discount_price_present
+                    else None
+                ),
+                discount_price_present=discount_price_present,
             )
         except ConfigurationError as exc:
             skipped_rows.append(exc.user_message)

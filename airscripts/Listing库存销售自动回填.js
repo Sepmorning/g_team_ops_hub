@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const HEADER_END_COLUMN = "CZ";
 const MAX_HEADER_ROW = 12;
 const MAX_SCAN_ROW = 20000;
@@ -49,6 +49,11 @@ const FIELD_DEFINITIONS = {
     ad_status: ["广告情况"],
     operation_notes: ["运营备注"],
     updated_at: ["本次更新时间"]
+};
+
+// 可选字段不参与完整表头校验；出现时仍要求名称唯一。
+const OPTIONAL_FIELD_DEFINITIONS = {
+    discount_price: ["优惠价"]
 };
 
 const ROLL_FIELDS = [
@@ -227,6 +232,7 @@ function headersAtRow(sheet, rowNumber) {
 
 function locateHeaders(sheet) {
     const keys = Object.keys(FIELD_DEFINITIONS);
+    const optionalKeys = Object.keys(OPTIONAL_FIELD_DEFINITIONS);
     let best = { count: -1, row: 1, missing: [], duplicates: [] };
     for (let rowNumber = 1; rowNumber <= MAX_HEADER_ROW; rowNumber++) {
         const headers = headersAtRow(sheet, rowNumber);
@@ -248,6 +254,22 @@ function locateHeaders(sheet) {
                     "）"
                 );
             } else {
+                columns[key] = matches[0];
+            }
+        }
+        for (let keyIndex = 0; keyIndex < optionalKeys.length; keyIndex++) {
+            const key = optionalKeys[keyIndex];
+            const aliases = OPTIONAL_FIELD_DEFINITIONS[key].map(normalizeHeader);
+            const matches = headers.filter(function (header) {
+                return aliases.indexOf(header.normalized) >= 0;
+            });
+            if (matches.length > 1) {
+                duplicates.push(
+                    OPTIONAL_FIELD_DEFINITIONS[key][0] + "（" +
+                    matches.map(function (item) { return item.text; }).join("、") +
+                    "）"
+                );
+            } else if (matches.length === 1) {
                 columns[key] = matches[0];
             }
         }
@@ -583,6 +605,17 @@ for (let index = 0; index < items.length; index++) {
             "final_monthly_sales",
             row,
             source.system_monthly_sales,
+            msku
+        );
+    }
+    if (columns.discount_price && hasOwn(source, "discount_price")) {
+        // 源文件有优惠价表头时，空值代表优惠结束，必须清除共享表旧值。
+        pushWrite(
+            writesByField,
+            "discount_price",
+            row,
+            source.discount_price === null || source.discount_price === undefined
+                ? "" : source.discount_price,
             msku
         );
     }

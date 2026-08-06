@@ -55,7 +55,7 @@ def config(token="placeholder-airscript-token"):
 def finished(result):
     if isinstance(result, dict) and result.get("success") is True:
         result = {
-            "schemaVersion": 8,
+            "schemaVersion": 10,
             "detailSheetName": "US-轨迹明细",
             **result,
         }
@@ -127,7 +127,7 @@ def test_dynamic_country_sheet_names_and_workbook_discovery_are_forwarded():
                 body=finished(
                     {
                         "success": True,
-                        "schemaVersion": 9,
+                        "schemaVersion": 10,
                         "sheets": [
                             {"id": "listing", "name": "纯粹-加拿大"},
                             {"id": "main", "name": "CA-FBA"},
@@ -156,7 +156,7 @@ def test_validate_accepts_json_string_result():
     result = json.dumps(
         {
             "success": True,
-            "schemaVersion": 8,
+            "schemaVersion": 10,
             "detailSheetName": "US-轨迹明细",
             "sheetName": "US-FBA",
             "columns": {
@@ -246,6 +246,34 @@ def test_sync_sends_only_successful_results_and_maps_summary():
     assert items == [{"fba": "FBA11111", "route": "2026-07-20 10:00 已到港"}]
 
 
+def test_sync_without_successful_results_still_cleans_inactive_detail_rows():
+    session = FakeSession(
+        [
+            FakeResponse(
+                body=finished(
+                    {
+                        "success": True,
+                        "updated": [],
+                        "unchanged": [],
+                        "notInSheet": [],
+                        "duplicateRows": [],
+                        "failures": [],
+                        "detailRowsRemoved": 12,
+                    }
+                )
+            )
+        ]
+    )
+
+    summary = AirScriptClient(config(), session=session).sync_tracking_results([])
+
+    argv = session.calls[0][1]["json"]["Context"]["argv"]
+    assert argv["action"] == "sync_tracking"
+    assert argv["items"] == []
+    assert summary.detail_rows_removed == 12
+    assert "明细清理 12 行" in summary.message
+
+
 def test_sync_total_is_unlimited_and_webhook_calls_are_split_to_fifty():
     response_one = {
         "success": True,
@@ -313,6 +341,7 @@ def test_rich_sync_sends_snapshot_and_deduplicated_event_payload():
                         "eventsAdded": 1,
                         "eventsUpdated": 2,
                         "eventsUnchanged": 3,
+                        "detailRowsRemoved": 4,
                     }
                 )
             )
@@ -362,6 +391,7 @@ def test_rich_sync_sends_snapshot_and_deduplicated_event_payload():
     assert summary.events_added == 1
     assert summary.events_updated == 2
     assert summary.events_unchanged == 3
+    assert summary.detail_rows_removed == 4
     assert "实际更新 2，无变化 3" in summary.message
 
 

@@ -59,6 +59,7 @@ function renderWpsDetails(wps){
   if(unchanged.length)notes.push(`<div class="status show info">主表无变化：${listText(unchanged)}</div>`);
   if(conflicts.length)notes.push(`<div class="status show error">人工值冲突（已保留原值、未标蓝）：${listText(conflicts)}</div>`);
   if(formatFailures.length)notes.push(`<div class="status show error">数据已按写入结果处理，但颜色格式存在警告：${listText(formatFailures)}</div>`);
+  if(Number(wps.detail_rows_removed||0)>0)notes.push(`<div class="status show info">已从轨迹明细清理不再活跃的货件记录：${Number(wps.detail_rows_removed)} 行</div>`);
   if(!changes.length&&!notes.length)notes.push('<div class="status show info">本次没有可写入的主表业务变化。</div>');
   wpsDetailNotes.innerHTML=notes.join('');
   wpsDetailCard.classList.remove('hidden');
