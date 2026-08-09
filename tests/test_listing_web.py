@@ -2,16 +2,16 @@ import re
 
 from fastapi.testclient import TestClient
 
-from anda_tracker.airscript import AirScriptConfig
-from anda_tracker.listing import (
+from g_team_ops.airscript import AirScriptConfig
+from g_team_ops.listing import (
     ListingAirScriptBinding,
     ListingRow,
     ListingSyncSummary,
     ParsedListingExport,
     TARGET_HEADERS,
 )
-from anda_tracker.storage import ProjectDatabase
-from anda_tracker.web.app import create_app
+from g_team_ops.storage import ProjectDatabase
+from g_team_ops.web.app import create_app
 
 
 def csrf_from(response) -> str:
@@ -90,11 +90,11 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
             ),
         )
         monkeypatch.setattr(
-            "anda_tracker.modules.inventory.router.parse_listing_export",
+            "g_team_ops.modules.inventory.router.parse_listing_export",
             lambda _data: parsed,
         )
         monkeypatch.setattr(
-            "anda_tracker.modules.inventory.router.ListingAirScriptClient.validate",
+            "g_team_ops.modules.inventory.router.ListingAirScriptClient.validate",
             lambda _self: ListingAirScriptBinding(
                 "纯粹-美国",
                 2,
@@ -108,7 +108,7 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
             return ListingSyncSummary(updated=["SKU-1"])
 
         monkeypatch.setattr(
-            "anda_tracker.modules.inventory.router.ListingAirScriptClient.sync",
+            "g_team_ops.modules.inventory.router.ListingAirScriptClient.sync",
             fake_sync,
         )
 

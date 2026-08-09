@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}我的店铺 · FBA运营工作台{% endblock %}
+{% block title %}我的店铺 · G组运营工作台{% endblock %}
 {% block content %}
 <header class="page-head">
   <div>
@@ -105,14 +105,14 @@ const shopStatus=document.querySelector('#shopStatus'),manageStatus=document.que
 let currentShopConfig=null;
 function openShop(){shopId.value='';shopName.value='';shopShare.value='';dialogTitle.textContent='添加店铺';shopDialog.showModal()}
 function editShop(btn){shopId.value=btn.dataset.id;shopName.value=btn.dataset.name;shopShare.value=btn.dataset.share;dialogTitle.textContent='编辑店铺基本信息';shopDialog.showModal()}
-async function saveShop(btn){FBA.buttonBusy(btn,true,'保存中…');try{const d=await FBA.api('/api/shops',{method:'POST',body:{id:shopId.value,name:shopName.value,share_url:shopShare.value}});shopDialog.close();FBA.showStatus(shopStatus,d.message,'ok');setTimeout(()=>location.reload(),650)}catch(e){FBA.showStatus(shopStatus,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
-async function deleteShop(id){if(!confirm('确定删除这个店铺及其本地脚本和站点配置？不会删除WPS中的表格内容。'))return;try{const d=await FBA.api(`/api/shops/${id}`,{method:'DELETE'});FBA.showStatus(shopStatus,d.message,'ok');setTimeout(()=>location.reload(),400)}catch(e){FBA.showStatus(shopStatus,e.message,'error')}}
+async function saveShop(btn){GTeam.buttonBusy(btn,true,'保存中…');try{const d=await GTeam.api('/api/shops',{method:'POST',body:{id:shopId.value,name:shopName.value,share_url:shopShare.value}});shopDialog.close();GTeam.showStatus(shopStatus,d.message,'ok');setTimeout(()=>location.reload(),650)}catch(e){GTeam.showStatus(shopStatus,e.message,'error')}finally{GTeam.buttonBusy(btn,false)}}
+async function deleteShop(id){if(!confirm('确定删除这个店铺及其本地脚本和站点配置？不会删除WPS中的表格内容。'))return;try{const d=await GTeam.api(`/api/shops/${id}`,{method:'DELETE'});GTeam.showStatus(shopStatus,d.message,'ok');setTimeout(()=>location.reload(),400)}catch(e){GTeam.showStatus(shopStatus,e.message,'error')}}
 
 async function openManage(id){manageShopId.value=id;manageDialog.showModal();await loadManageConfig()}
 async function loadManageConfig(){
-  FBA.showStatus(manageStatus,'正在读取配置…','info');
+  GTeam.showStatus(manageStatus,'正在读取配置…','info');
   try{
-    currentShopConfig=await FBA.api(`/api/shops/${manageShopId.value}/config`);
+    currentShopConfig=await GTeam.api(`/api/shops/${manageShopId.value}/config`);
     manageTitle.textContent=`${currentShopConfig.shop.name} · 集中配置`;manageShare.textContent=currentShopConfig.shop.share_url;managePrefix.textContent=currentShopConfig.shop.listing_prefix||'尚未确认';
     trackingWebhook.value=currentShopConfig.connections.tracking.webhook_url||'';trackingToken.value='';
     listingWebhook.value=currentShopConfig.connections.listing.webhook_url||'';listingToken.value='';
@@ -120,18 +120,18 @@ async function loadManageConfig(){
     setConnectionPill(listingPill,currentShopConfig.connections.listing.configured);
     renderSites(currentShopConfig.sites||[]);
     manageStatus.className='status';
-  }catch(e){FBA.showStatus(manageStatus,e.message,'error')}
+  }catch(e){GTeam.showStatus(manageStatus,e.message,'error')}
 }
 function setConnectionPill(element,configured){element.textContent=configured?'已连接':'未配置';element.className=`pill ${configured?'success':''}`}
 async function saveModuleConnection(module,button){
   const isTracking=module==='tracking',webhook=isTracking?trackingWebhook.value:listingWebhook.value,token=isTracking?trackingToken.value:listingToken.value;
   const path=isTracking?'logistics-connection':'listing-connection';
-  FBA.buttonBusy(button,true,'连接中…');
-  try{const d=await FBA.api(`/api/shops/${manageShopId.value}/${path}`,{method:'POST',body:{webhook_url:webhook,api_token:token}});let message=d.message,kind='ok';try{const scanResult=await scanAndConfirm(false);message+=`；${scanResult.data.message}`;if(scanResult.cancelled){message+='；尚未确认Listing前缀';kind='info'}if(scanResult.data.warnings?.length){message+=`；提示：${scanResult.data.warnings.join('；')}`;kind='info'}}catch(scanError){message+=`；脚本已保存，但自动扫描未完成：${scanError.message}`;kind='info'}await loadManageConfig();FBA.showStatus(manageStatus,message,kind)}
-  catch(e){FBA.showStatus(manageStatus,e.message,'error')}finally{FBA.buttonBusy(button,false)}
+  GTeam.buttonBusy(button,true,'连接中…');
+  try{const d=await GTeam.api(`/api/shops/${manageShopId.value}/${path}`,{method:'POST',body:{webhook_url:webhook,api_token:token}});let message=d.message,kind='ok';try{const scanResult=await scanAndConfirm(false);message+=`；${scanResult.data.message}`;if(scanResult.cancelled){message+='；尚未确认Listing前缀';kind='info'}if(scanResult.data.warnings?.length){message+=`；提示：${scanResult.data.warnings.join('；')}`;kind='info'}}catch(scanError){message+=`；脚本已保存，但自动扫描未完成：${scanError.message}`;kind='info'}await loadManageConfig();GTeam.showStatus(manageStatus,message,kind)}
+  catch(e){GTeam.showStatus(manageStatus,e.message,'error')}finally{GTeam.buttonBusy(button,false)}
 }
 async function scanAndConfirm(resetPrefix=false){
-  let data=await FBA.api(`/api/shops/${manageShopId.value}/discover-sites`,{method:'POST',body:{reset_listing_prefix:resetPrefix}});
+  let data=await GTeam.api(`/api/shops/${manageShopId.value}/discover-sites`,{method:'POST',body:{reset_listing_prefix:resetPrefix}});
   if(!data.confirmation_required)return {data,cancelled:false};
   const prefixes=data.available_listing_prefixes||[];
   let selected='';
@@ -146,13 +146,13 @@ async function scanAndConfirm(resetPrefix=false){
   }else{
     return {data,cancelled:true};
   }
-  data=await FBA.api(`/api/shops/${manageShopId.value}/discover-sites`,{method:'POST',body:{confirm_listing_prefix:selected}});
+  data=await GTeam.api(`/api/shops/${manageShopId.value}/discover-sites`,{method:'POST',body:{confirm_listing_prefix:selected}});
   return {data,cancelled:false};
 }
 async function scanSites(button,resetPrefix=false){
-  FBA.buttonBusy(button,true,'扫描中…');
-  try{const result=await scanAndConfirm(resetPrefix);const d=result.data,warning=d.warnings?.length?`；提示：${d.warnings.join('；')}`:'';await loadManageConfig();FBA.showStatus(manageStatus,d.message+warning+(result.cancelled?'；未修改已保存前缀':''),result.cancelled||d.warnings?.length?'info':'ok')}
-  catch(e){FBA.showStatus(manageStatus,e.message,'error')}finally{FBA.buttonBusy(button,false)}
+  GTeam.buttonBusy(button,true,'扫描中…');
+  try{const result=await scanAndConfirm(resetPrefix);const d=result.data,warning=d.warnings?.length?`；提示：${d.warnings.join('；')}`:'';await loadManageConfig();GTeam.showStatus(manageStatus,d.message+warning+(result.cancelled?'；未修改已保存前缀':''),result.cancelled||d.warnings?.length?'info':'ok')}
+  catch(e){GTeam.showStatus(manageStatus,e.message,'error')}finally{GTeam.buttonBusy(button,false)}
 }
 function renderSites(sites){
   siteList.replaceChildren();
@@ -173,8 +173,8 @@ function renderSites(sites){
   });table.append(thead,tbody);siteList.append(table);
 }
 function openSiteDialog(item=null){siteId.value=item?.id||'';siteCountryName.value=item?.country_name||'';siteCountryCode.value=item?.country_code||'';siteListingSheet.value=item?.listing_sheet_name||'';siteFbaSheet.value=item?.fba_sheet_name||'';siteDetailSheet.value=item?.detail_sheet_name||'';siteDialogTitle.textContent=item?'编辑国家站点':'添加国家站点';siteDialog.showModal()}
-async function saveSite(button){FBA.buttonBusy(button,true,'保存中…');try{const d=await FBA.api(`/api/shops/${manageShopId.value}/sites`,{method:'POST',body:{id:siteId.value,country_name:siteCountryName.value,country_code:siteCountryCode.value,listing_sheet_name:siteListingSheet.value,fba_sheet_name:siteFbaSheet.value,detail_sheet_name:siteDetailSheet.value}});siteDialog.close();await loadManageConfig();FBA.showStatus(manageStatus,d.message,'ok')}catch(e){FBA.showStatus(manageStatus,e.message,'error')}finally{FBA.buttonBusy(button,false)}}
-async function validateSite(id,module,button){FBA.buttonBusy(button,true,'测试中…');try{const d=await FBA.api(`/api/shops/${manageShopId.value}/sites/${id}/validation`,{method:'POST',body:{module}});FBA.showStatus(manageStatus,d.message,'ok')}catch(e){FBA.showStatus(manageStatus,e.message,'error')}finally{FBA.buttonBusy(button,false)}}
-async function deleteSite(id){if(!confirm('确定删除这个国家站点映射？不会删除WPS中的表格内容。'))return;try{const d=await FBA.api(`/api/inventory/countries/${id}`,{method:'DELETE'});await loadManageConfig();FBA.showStatus(manageStatus,d.message,'ok')}catch(e){FBA.showStatus(manageStatus,e.message,'error')}}
+async function saveSite(button){GTeam.buttonBusy(button,true,'保存中…');try{const d=await GTeam.api(`/api/shops/${manageShopId.value}/sites`,{method:'POST',body:{id:siteId.value,country_name:siteCountryName.value,country_code:siteCountryCode.value,listing_sheet_name:siteListingSheet.value,fba_sheet_name:siteFbaSheet.value,detail_sheet_name:siteDetailSheet.value}});siteDialog.close();await loadManageConfig();GTeam.showStatus(manageStatus,d.message,'ok')}catch(e){GTeam.showStatus(manageStatus,e.message,'error')}finally{GTeam.buttonBusy(button,false)}}
+async function validateSite(id,module,button){GTeam.buttonBusy(button,true,'测试中…');try{const d=await GTeam.api(`/api/shops/${manageShopId.value}/sites/${id}/validation`,{method:'POST',body:{module}});GTeam.showStatus(manageStatus,d.message,'ok')}catch(e){GTeam.showStatus(manageStatus,e.message,'error')}finally{GTeam.buttonBusy(button,false)}}
+async function deleteSite(id){if(!confirm('确定删除这个国家站点映射？不会删除WPS中的表格内容。'))return;try{const d=await GTeam.api(`/api/inventory/countries/${id}`,{method:'DELETE'});await loadManageConfig();GTeam.showStatus(manageStatus,d.message,'ok')}catch(e){GTeam.showStatus(manageStatus,e.message,'error')}}
 </script>
 {% endblock %}

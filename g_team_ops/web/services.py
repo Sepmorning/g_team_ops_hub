@@ -28,7 +28,7 @@ from ..tracking_details import (
 )
 
 
-logger = logging.getLogger("fba_tracker.web.services")
+logger = logging.getLogger("g_team_ops.web.services")
 CAPTCHA_TTL_SECONDS = 5 * 60
 VALIDATED_CLIENT_TTL_SECONDS = 30
 CARRIER_STATUS_SNAPSHOT_TTL_SECONDS = 10 * 60

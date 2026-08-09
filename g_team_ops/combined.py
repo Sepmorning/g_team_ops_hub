@@ -8,7 +8,7 @@ from .models import QueryStatus, TrackingResult
 
 
 SYSTEM_QUERY_BATCH_SIZE = 50
-logger = logging.getLogger("fba_tracker.carriers")
+logger = logging.getLogger("g_team_ops.carriers")
 
 
 def query_in_batches(

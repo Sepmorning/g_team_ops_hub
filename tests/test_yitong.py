@@ -1,9 +1,9 @@
 import requests
 from datetime import date, timedelta
 
-from anda_tracker.errors import AuthenticationError, NetworkError
-from anda_tracker.models import QueryStatus
-from anda_tracker.yitong import CaptchaChallenge, YiTongClient, YiTongQueryService
+from g_team_ops.errors import AuthenticationError, NetworkError
+from g_team_ops.models import QueryStatus
+from g_team_ops.yitong import CaptchaChallenge, YiTongClient, YiTongQueryService
 
 
 class FakeResponse:

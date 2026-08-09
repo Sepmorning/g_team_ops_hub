@@ -4,8 +4,8 @@ import zipfile
 
 import pytest
 
-from anda_tracker.errors import ConfigurationError
-from anda_tracker.listing import (
+from g_team_ops.errors import ConfigurationError
+from g_team_ops.listing import (
     SOURCE_HEADERS,
     calculate_system_monthly_sales,
     infer_listing_data_date,

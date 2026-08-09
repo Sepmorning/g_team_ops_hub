@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from anda_tracker.listing import TARGET_HEADERS
+from g_team_ops.listing import TARGET_HEADERS
 
 
 LISTING_SCRIPT_PATH = (

@@ -4,16 +4,16 @@
 
 本目录只保留网页版：
 
-- `FbaTrackerWeb.exe`：本机FastAPI后端，启动后自动打开浏览器。
-- `anda_tracker/web/factory.py`：应用工厂，只装配依赖和注册模块；
-- `anda_tracker/web/context.py`：当前用户、数据库、模板和CSRF公共依赖；
-- `anda_tracker/modules/`：账号、货代连接、店铺、物流和库存销售功能路由；
-- `anda_tracker/web/app.py`：兼容入口，不再放置业务路由。
+- `GTeamOpsHub.exe`：本机FastAPI后端，启动后自动打开浏览器。
+- `g_team_ops/web/factory.py`：应用工厂，只装配依赖和注册模块；
+- `g_team_ops/web/context.py`：当前用户、数据库、模板和CSRF公共依赖；
+- `g_team_ops/modules/`：账号、货代连接、店铺、物流和库存销售功能路由；
+- `g_team_ops/web/app.py`：兼容入口，不再放置业务路由。
 
 桌面验证版已分离到 `D:\CodexProject\FBA_Tracker_Desktop`。两套项目的源码、依赖、数据库和EXE互相独立。
 
 新增模块必须遵守[架构与模块开发规范.md](架构与模块开发规范.md)：在
-`anda_tracker/modules/<module_name>`内开发，并配套独立业务测试和Web接口测试。
+`g_team_ops/modules/<module_name>`内开发，并配套独立业务测试和Web接口测试。
 禁止将新功能重新堆入应用工厂、其他模块路由或单个超大模板脚本。
 
 ## 本机启动
@@ -21,7 +21,7 @@
 最简单的方式是双击：
 
 ```text
-FbaTrackerWeb.exe
+GTeamOpsHub.exe
 ```
 
 启动后浏览器会自动打开：
@@ -116,7 +116,7 @@ Listing模块使用另一份独立AirScript，不复用物流Webhook和令牌。
 国家子表映射、同日重试规则及首次启用步骤见
 [库存销售表格模块使用说明.md](库存销售表格模块使用说明.md)。
 
-源码更新后，现有`FbaTrackerWeb.exe`不会自动变化。如需使用EXE运行本模块，应在完整测试
+源码更新后，现有`GTeamOpsHub.exe`不会自动变化。如需使用EXE运行本模块，应在完整测试
 通过后执行：
 
 ```powershell

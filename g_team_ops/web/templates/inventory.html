@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}库存销售表格 · FBA运营工作台{% endblock %}
+{% block title %}库存销售表格 · G组运营工作台{% endblock %}
 {% block content %}
 <header class="page-head">
   <div>
@@ -98,14 +98,14 @@ const inventoryStatus=document.querySelector('#inventoryStatus');
 let inventoryConfig=null;
 let previewId='';
 
-function showInventory(message,kind='info'){FBA.showStatus(inventoryStatus,message,kind);window.scrollTo({top:0,behavior:'smooth'})}
+function showInventory(message,kind='info'){GTeam.showStatus(inventoryStatus,message,kind);window.scrollTo({top:0,behavior:'smooth'})}
 function valueText(value){return value===null||value===undefined?'—':String(value)}
 
 async function loadInventoryConfig(){
   previewId='';previewCard.classList.add('hidden');countrySelect.replaceChildren();countrySelect.disabled=true;
-  FBA.showStatus(connectionHint,'正在读取店铺和站点配置…','info');
+  GTeam.showStatus(connectionHint,'正在读取店铺和站点配置…','info');
   try{
-    inventoryConfig=await FBA.api(`/api/inventory/config?shop_id=${encodeURIComponent(shopSelect.value)}`);
+    inventoryConfig=await GTeam.api(`/api/inventory/config?shop_id=${encodeURIComponent(shopSelect.value)}`);
     const countries=inventoryConfig.countries||[];
     countries.forEach(item=>{
       const option=document.createElement('option');
@@ -117,9 +117,9 @@ async function loadInventoryConfig(){
     const ready=countries.filter(item=>item.listing_ready);
     countrySelect.disabled=!ready.length;
     if(!inventoryConfig.connection.configured){
-      FBA.showStatus(connectionHint,'该店铺尚未配置Listing脚本，请前往“我的店铺”完成配置','error');
+      GTeam.showStatus(connectionHint,'该店铺尚未配置Listing脚本，请前往“我的店铺”完成配置','error');
     }else if(!ready.length){
-      FBA.showStatus(connectionHint,'该店铺尚无可用Listing站点，请在“我的店铺”扫描或补全站点','error');
+      GTeam.showStatus(connectionHint,'该店铺尚无可用Listing站点，请在“我的店铺”扫描或补全站点','error');
     }else{
       countrySelect.value=ready[0].id;
       await validateSelectedSite();
@@ -129,11 +129,11 @@ async function loadInventoryConfig(){
 
 async function validateSelectedSite(){
   if(!shopSelect.value||!countrySelect.value)return;
-  FBA.showStatus(connectionHint,'正在验证所选Listing子表…','info');
+  GTeam.showStatus(connectionHint,'正在验证所选Listing子表…','info');
   try{
-    const data=await FBA.api(`/api/shops/${shopSelect.value}/sites/${countrySelect.value}/validation`,{method:'POST',body:{module:'listing'}});
-    FBA.showStatus(connectionHint,data.message,'ok');
-  }catch(e){FBA.showStatus(connectionHint,e.message,'error')}
+    const data=await GTeam.api(`/api/shops/${shopSelect.value}/sites/${countrySelect.value}/validation`,{method:'POST',body:{module:'listing'}});
+    GTeam.showStatus(connectionHint,data.message,'ok');
+  }catch(e){GTeam.showStatus(connectionHint,e.message,'error')}
 }
 
 function inferFileDate(){
@@ -145,9 +145,9 @@ async function previewListing(button){
   if(!countrySelect.value){showInventory('请先选择已连接Listing脚本的国家站点','error');return}
   if(!listingFile.files[0]){showInventory('请选择领星导出的.xlsx文件','error');return}
   const form=new FormData();form.append('shop_id',shopSelect.value);form.append('country_id',countrySelect.value);form.append('data_date',dataDate.value);form.append('file',listingFile.files[0]);
-  FBA.buttonBusy(button,true,'读取并验证…');
+  GTeam.buttonBusy(button,true,'读取并验证…');
   try{
-    const data=await FBA.api('/api/inventory/imports/preview',{method:'POST',body:form});previewId=data.preview_id;
+    const data=await GTeam.api('/api/inventory/imports/preview',{method:'POST',body:form});previewId=data.preview_id;
     previewSummary.textContent=`${data.shop_name} / ${data.country_name} / ${data.sheet_name}；数据日期 ${data.data_date}；可更新 ${data.row_count} 个唯一 MSKU。下表最多展示前30行。`;
     const warnings=[];
     if(data.duplicate_mskus.length)warnings.push(`文件内重复MSKU已跳过：${data.duplicate_mskus.join('、')}`);
@@ -156,7 +156,7 @@ async function previewListing(button){
     if(data.discount_price?.will_update)warnings.push('两份表均已识别“优惠价”，本次将同步；领星空值会清除共享表旧优惠价');
     else if(data.discount_price?.source_present)warnings.push('领星文件有“优惠价”，但共享表没有该列，本次已忽略优惠价');
     else if(data.discount_price?.target_present)warnings.push('共享表有“优惠价”，但领星文件没有该列，本次不会修改原优惠价');
-    if(warnings.length)FBA.showStatus(previewWarnings,warnings.join('；'),'info');else previewWarnings.className='status';
+    if(warnings.length)GTeam.showStatus(previewWarnings,warnings.join('；'),'info');else previewWarnings.className='status';
     previewRows.replaceChildren();
     data.sample.forEach(item=>{
       const tr=document.createElement('tr');
@@ -164,15 +164,15 @@ async function previewListing(button){
       cells.forEach(value=>{const td=document.createElement('td');td.textContent=value;tr.append(td)});previewRows.append(tr);
     });
     previewCard.classList.remove('hidden');previewCard.scrollIntoView({behavior:'smooth'});
-  }catch(e){showInventory(e.message,'error')}finally{FBA.buttonBusy(button,false)}
+  }catch(e){showInventory(e.message,'error')}finally{GTeam.buttonBusy(button,false)}
 }
 
 async function applyListing(button){
   if(!previewId)return;
   if(!confirm('确认把本次数据写入所选Listing子表？同日重试只修正本次值；更晚日期会滚动上次值。'))return;
-  FBA.buttonBusy(button,true,'正在更新共享表…');
-  try{const data=await FBA.api('/api/inventory/imports/apply',{method:'POST',body:{preview_id:previewId}});showInventory(data.message,'ok')}
-  catch(e){showInventory(e.message,'error')}finally{FBA.buttonBusy(button,false)}
+  GTeam.buttonBusy(button,true,'正在更新共享表…');
+  try{const data=await GTeam.api('/api/inventory/imports/apply',{method:'POST',body:{preview_id:previewId}});showInventory(data.message,'ok')}
+  catch(e){showInventory(e.message,'error')}finally{GTeam.buttonBusy(button,false)}
 }
 
 const localToday=new Date();

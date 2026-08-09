@@ -3,15 +3,15 @@ import json
 import pytest
 import requests
 
-from anda_tracker.airscript import (
+from g_team_ops.airscript import (
     AirScriptClient,
     AirScriptConfig,
     AIRSCRIPT_RICH_WRITE_BATCH_SIZE,
     AIRSCRIPT_WRITE_BATCH_SIZE,
     validate_webhook_url,
 )
-from anda_tracker.errors import AuthenticationError, ConfigurationError, NetworkError, ResponseError
-from anda_tracker.models import (
+from g_team_ops.errors import AuthenticationError, ConfigurationError, NetworkError, ResponseError
+from g_team_ops.models import (
     QueryStatus,
     TrackingEvent,
     TrackingResult,
@@ -467,7 +467,7 @@ def test_authentication_and_script_errors_are_classified():
 
 
 def test_network_failure_is_retried_and_classified(monkeypatch):
-    monkeypatch.setattr("anda_tracker.airscript.time.sleep", lambda *_args: None)
+    monkeypatch.setattr("g_team_ops.airscript.time.sleep", lambda *_args: None)
     session = FakeSession([requests.ConnectionError("offline"), requests.ConnectionError("offline")])
     client = AirScriptClient(config(), session=session, retries=1)
     with pytest.raises(NetworkError):

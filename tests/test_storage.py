@@ -1,7 +1,7 @@
 import sqlite3
 
-from anda_tracker.airscript import AirScriptConfig
-from anda_tracker.storage import (
+from g_team_ops.airscript import AirScriptConfig
+from g_team_ops.storage import (
     ProjectDatabase,
     SYSTEM_MAX_QUERY_COUNT,
     protect_secret,

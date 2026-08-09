@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}账号管理 · FBA运营工作台{% endblock %}
+{% block title %}账号管理 · G组运营工作台{% endblock %}
 {% block content %}
 <header class="page-head"><div><h1>账号管理</h1><p>管理员管理登录权限，但不能查看其他用户的货代密码、令牌和共享表。</p></div><button class="btn primary" onclick="userDialog.showModal()">新建账号</button></header>
 <div id="adminStatus" class="status"></div>
@@ -11,8 +11,8 @@
 {% block scripts %}
 <script>
 const adminStatus=document.querySelector('#adminStatus');
-async function createUser(btn){FBA.buttonBusy(btn,true);try{const d=await FBA.api('/api/admin/users',{method:'POST',body:{username:newUsername.value,display_name:newDisplay.value,role:newRole.value,password:newPassword.value}});FBA.showStatus(adminStatus,d.message,'ok');userDialog.close();setTimeout(()=>location.reload(),450)}catch(e){FBA.showStatus(adminStatus,e.message,'error')}finally{FBA.buttonBusy(btn,false)}}
-async function toggleUser(id){if(!confirm('确定更改这个账号的启用状态？'))return;try{await FBA.api(`/api/admin/users/${id}/toggle`,{method:'POST'});location.reload()}catch(e){FBA.showStatus(adminStatus,e.message,'error')}}
-async function resetPassword(id,name){const password=prompt(`请输入 ${name} 的新临时密码（至少8位）`);if(!password)return;try{const d=await FBA.api(`/api/admin/users/${id}/reset-password`,{method:'POST',body:{password}});FBA.showStatus(adminStatus,d.message+'；用户下次登录必须修改。','ok')}catch(e){FBA.showStatus(adminStatus,e.message,'error')}}
+async function createUser(btn){GTeam.buttonBusy(btn,true);try{const d=await GTeam.api('/api/admin/users',{method:'POST',body:{username:newUsername.value,display_name:newDisplay.value,role:newRole.value,password:newPassword.value}});GTeam.showStatus(adminStatus,d.message,'ok');userDialog.close();setTimeout(()=>location.reload(),450)}catch(e){GTeam.showStatus(adminStatus,e.message,'error')}finally{GTeam.buttonBusy(btn,false)}}
+async function toggleUser(id){if(!confirm('确定更改这个账号的启用状态？'))return;try{await GTeam.api(`/api/admin/users/${id}/toggle`,{method:'POST'});location.reload()}catch(e){GTeam.showStatus(adminStatus,e.message,'error')}}
+async function resetPassword(id,name){const password=prompt(`请输入 ${name} 的新临时密码（至少8位）`);if(!password)return;try{const d=await GTeam.api(`/api/admin/users/${id}/reset-password`,{method:'POST',body:{password}});GTeam.showStatus(adminStatus,d.message+'；用户下次登录必须修改。','ok')}catch(e){GTeam.showStatus(adminStatus,e.message,'error')}}
 </script>
 {% endblock %}

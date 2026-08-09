@@ -1,6 +1,6 @@
-from anda_tracker.errors import AuthenticationError, NetworkError
-from anda_tracker.models import QueryStatus
-from anda_tracker.service import AndaQueryService
+from g_team_ops.errors import AuthenticationError, NetworkError
+from g_team_ops.models import QueryStatus
+from g_team_ops.service import AndaQueryService
 
 
 class StubClient:

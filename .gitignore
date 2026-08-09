@@ -5,6 +5,8 @@ __pycache__/
 .build-exe/
 .build-web-exe/
 .build-web-exe-*/
+.build-g-team-ops/
+.build-g-team-ops-*/
 .exe-smoke-*/
 dist/
 build/

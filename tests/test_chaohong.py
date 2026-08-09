@@ -1,7 +1,7 @@
 import requests
 
-from anda_tracker.chaohong import ChaoHongClient, ChaoHongQueryService
-from anda_tracker.models import QueryStatus
+from g_team_ops.chaohong import ChaoHongClient, ChaoHongQueryService
+from g_team_ops.models import QueryStatus
 
 
 class FakeResponse:

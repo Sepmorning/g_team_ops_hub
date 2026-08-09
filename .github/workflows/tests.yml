@@ -19,4 +19,4 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
       - name: Compile Python sources
-        run: python -m compileall -q anda_tracker web_main.py tests
+        run: python -m compileall -q g_team_ops web_main.py tests

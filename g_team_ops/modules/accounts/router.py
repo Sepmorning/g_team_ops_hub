@@ -28,7 +28,7 @@ def build_router(ctx: WebContext) -> APIRouter:
 
     @router.get("/health")
     async def health():
-        return {"ok": True, "service": "FBA运营工作台"}
+        return {"ok": True, "service": "G组运营工作台"}
 
     @router.get("/", response_class=HTMLResponse)
     async def home(request: Request):

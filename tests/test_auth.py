@@ -2,9 +2,9 @@ import sqlite3
 
 import pytest
 
-from anda_tracker.auth import UserRepository, verify_password
-from anda_tracker.errors import ConfigurationError
-from anda_tracker.storage import ProjectDatabase
+from g_team_ops.auth import UserRepository, verify_password
+from g_team_ops.errors import ConfigurationError
+from g_team_ops.storage import ProjectDatabase
 
 
 def test_bootstrap_admin_hashes_login_password_and_migrates_default_profile(tmp_path):

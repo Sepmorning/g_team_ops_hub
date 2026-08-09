@@ -1,4 +1,4 @@
-# FBA运营工作台（网页版）
+# G组运营工作台（网页版）
 
 这是当前持续开发的FastAPI网页版项目。桌面验证版已经分离到同级目录 `D:\CodexProject\FBA_Tracker_Desktop`，两套程序拥有独立源码、依赖、数据库和EXE，互不读写对方的数据。
 
@@ -8,13 +8,15 @@
 每台电脑首次运行都会在自己的 `data` 目录创建独立配置。
 
 ```powershell
-git clone https://github.com/Sepmorning/FBA_Tracker.git
-cd FBA_Tracker
+git clone https://github.com/Sepmorning/g_team_ops_hub.git
+cd g_team_ops_hub
 .\setup_project.ps1
 .\start_web.ps1
 ```
 
-也可以在Windows中直接运行仓库根目录的 `FbaTrackerWeb.exe`。源码开发建议使用
+GitHub远程仓库和本机项目目录现已统一使用`g_team_ops_hub`。旧仓库地址由GitHub自动跳转，但新安装和文档必须使用新地址。
+
+也可以在Windows中直接运行仓库根目录的 `GTeamOpsHub.exe`。源码开发建议使用
 64位Python 3.11或3.12；安装脚本会在项目内创建 `.venv`，不会修改项目代码。
 
 首次使用按以下顺序配置：
@@ -57,7 +59,7 @@ cd FBA_Tracker
 直接运行：
 
 ```text
-FbaTrackerWeb.exe
+GTeamOpsHub.exe
 ```
 
 浏览器访问 `http://127.0.0.1:8765`。关闭EXE窗口会停止本机服务。
@@ -75,7 +77,7 @@ FbaTrackerWeb.exe
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m compileall -q anda_tracker web_main.py tests
+.\.venv\Scripts\python.exe -m compileall -q g_team_ops web_main.py tests
 ```
 
 重新生成网页版EXE：
@@ -87,8 +89,8 @@ FbaTrackerWeb.exe
 ## 主要目录
 
 ```text
-anda_fba_tracker/
-├─ anda_tracker/
+g_team_ops_hub/
+├─ g_team_ops/
 │  ├─ modules/             按业务能力拆分的FastAPI功能路由
 │  │  ├─ accounts/         登录、密码和账号管理
 │  │  ├─ carrier_connections/ 货代账号、验证码和连接状态
@@ -119,12 +121,27 @@ anda_fba_tracker/
 ├─ web_main.py             网页版入口
 ├─ start_web.ps1           源码启动脚本
 ├─ build_web_exe.ps1       EXE构建脚本
-└─ FbaTrackerWeb.exe
+└─ GTeamOpsHub.exe
 ```
 
 项目采用模块化单体。新增模块的目录、边界、测试和前端约束统一见
 [架构与模块开发规范.md](架构与模块开发规范.md)，不得把新业务路由重新写入
 `web/app.py`或`web/factory.py`。
+
+项目的需求决策、历史改动和每次后续开发记录见[开发日志.md](开发日志.md)。
+准备在新的Codex任务中继续开发时，直接复制[新任务交接说明.md](新任务交接说明.md)
+中的提示词，并先让新任务完成只读检查。
+
+## 项目命名
+
+- 产品名称：G组运营工作台
+- 本机项目目录：`g_team_ops_hub`
+- Python业务包：`g_team_ops`
+- Windows程序：`GTeamOpsHub.exe`
+- GitHub远程仓库：`https://github.com/Sepmorning/g_team_ops_hub`
+
+FBA仍是物流、库存和共享表中的业务术语，不因产品更名而替换。旧本地目录
+`anda_fba_tracker`、旧Python包`anda_tracker`和旧程序`FbaTrackerWeb.exe`不再使用。
 
 ## 数据和安全
 

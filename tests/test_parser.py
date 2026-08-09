@@ -1,4 +1,4 @@
-from anda_tracker.parser import parse_fba_input
+from g_team_ops.parser import parse_fba_input
 
 
 def test_parses_all_supported_separators_and_normalizes_case():

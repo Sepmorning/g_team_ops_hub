@@ -31,7 +31,7 @@ from .services import CaptchaRegistry, QueryCoordinator
 
 def _web_assets() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        return Path(sys._MEIPASS) / "anda_tracker" / "web"
+        return Path(sys._MEIPASS) / "g_team_ops" / "web"
     return Path(__file__).resolve().parent
 
 
@@ -63,7 +63,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     listing_preview_registry = ListingPreviewRegistry()
 
     app = FastAPI(
-        title="FBA运营工作台",
+        title="G组运营工作台",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -71,7 +71,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     app.add_middleware(
         SessionMiddleware,
         secret_key=_session_secret(data_dir),
-        session_cookie="fba_tracker_session",
+        session_cookie="g_team_ops_session",
         same_site="lax",
         https_only=False,
         max_age=8 * 60 * 60,

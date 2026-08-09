@@ -1,7 +1,7 @@
 import requests
 
-from anda_tracker.client import AndaClient
-from anda_tracker.errors import AuthenticationError, NetworkError, ResponseError
+from g_team_ops.client import AndaClient
+from g_team_ops.errors import AuthenticationError, NetworkError, ResponseError
 
 
 class FakeResponse:

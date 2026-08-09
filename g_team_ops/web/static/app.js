@@ -34,4 +34,4 @@ function buttonBusy(button, busy, text = '处理中…') {
   }
 }
 
-window.FBA = { api, showStatus, buttonBusy };
+window.GTeam = { api, showStatus, buttonBusy };

@@ -1,10 +1,10 @@
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-$TempRoot = Join-Path $ProjectRoot ".build-web-exe"
-$OutputExe = Join-Path $ProjectRoot "FbaTrackerWeb.exe"
-$Templates = Join-Path $ProjectRoot "anda_tracker\web\templates"
-$Static = Join-Path $ProjectRoot "anda_tracker\web\static"
+$TempRoot = Join-Path $ProjectRoot ".build-g-team-ops"
+$OutputExe = Join-Path $ProjectRoot "GTeamOpsHub.exe"
+$Templates = Join-Path $ProjectRoot "g_team_ops\web\templates"
+$Static = Join-Path $ProjectRoot "g_team_ops\web\static"
 
 if (-not (Test-Path -LiteralPath $Python)) {
     throw "Run setup_project.ps1 to install the project environment first."
@@ -21,15 +21,15 @@ try {
         --clean `
         --onefile `
         --console `
-        --name "FbaTrackerWeb" `
-        --add-data "$Templates;anda_tracker\web\templates" `
-        --add-data "$Static;anda_tracker\web\static" `
+        --name "GTeamOpsHub" `
+        --add-data "$Templates;g_team_ops\web\templates" `
+        --add-data "$Static;g_team_ops\web\static" `
         --distpath (Join-Path $TempRoot "dist") `
         --workpath (Join-Path $TempRoot "work") `
         --specpath $TempRoot `
         web_main.py
     if ($LASTEXITCODE -ne 0) { throw "Web EXE build failed with exit code: $LASTEXITCODE" }
-    Copy-Item -LiteralPath (Join-Path $TempRoot "dist\FbaTrackerWeb.exe") -Destination $OutputExe -Force
+    Copy-Item -LiteralPath (Join-Path $TempRoot "dist\GTeamOpsHub.exe") -Destination $OutputExe -Force
 }
 finally { Pop-Location }
 

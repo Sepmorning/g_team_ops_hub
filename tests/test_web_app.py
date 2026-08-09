@@ -2,16 +2,16 @@ import re
 
 from fastapi.testclient import TestClient
 
-from anda_tracker.models import QueryStatus, TrackingResult
-from anda_tracker.airscript import (
+from g_team_ops.models import QueryStatus, TrackingResult
+from g_team_ops.airscript import (
     AirScriptConfig,
     AirScriptSyncSummary,
     PendingTrackingItem,
 )
-from anda_tracker.errors import NetworkError
-from anda_tracker.storage import ProjectDatabase
-from anda_tracker.web.app import create_app
-from anda_tracker.web.services import (
+from g_team_ops.errors import NetworkError
+from g_team_ops.storage import ProjectDatabase
+from g_team_ops.web.app import create_app
+from g_team_ops.web.services import (
     CarrierConnectionStatus,
     QueryCoordinator,
     WebQueryResponse,
@@ -244,7 +244,7 @@ def test_saving_and_deleting_one_carrier_preserves_other_recent_statuses(
             instance.token = "new-anda-token"
 
         monkeypatch.setattr(
-            "anda_tracker.modules.carrier_connections.router.AndaClient.login",
+            "g_team_ops.modules.carrier_connections.router.AndaClient.login",
             fake_login,
         )
         saved = client.post(
@@ -389,7 +389,7 @@ def test_automatic_shop_task_stops_when_required_carrier_is_disconnected(
                 return [PendingTrackingItem("FBA11111", "易通物流")]
 
         monkeypatch.setattr(
-            "anda_tracker.modules.tracking.router.AirScriptClient",
+            "g_team_ops.modules.tracking.router.AirScriptClient",
             FakeAirScriptClient,
         )
         validated = {}
@@ -457,7 +457,7 @@ def test_automatic_shop_task_reads_pending_then_queries_and_syncs(tmp_path, monk
                 ]
 
         monkeypatch.setattr(
-            "anda_tracker.modules.tracking.router.AirScriptClient",
+            "g_team_ops.modules.tracking.router.AirScriptClient",
             FakeAirScriptClient,
         )
         called = {}
@@ -525,7 +525,7 @@ def test_automatic_shop_task_cleans_details_when_no_pending_fba(
                 return AirScriptSyncSummary(detail_rows_removed=7)
 
         monkeypatch.setattr(
-            "anda_tracker.modules.tracking.router.AirScriptClient",
+            "g_team_ops.modules.tracking.router.AirScriptClient",
             FakeAirScriptClient,
         )
         response = client.post(
@@ -575,7 +575,7 @@ def test_shop_discovery_saves_sites_with_one_stable_listing_prefix(
                 ]
 
         monkeypatch.setattr(
-            "anda_tracker.modules.shops.router.ListingAirScriptClient",
+            "g_team_ops.modules.shops.router.ListingAirScriptClient",
             FakeListingAirScriptClient,
         )
         response = client.post(
@@ -742,7 +742,7 @@ def test_routed_query_falls_back_only_for_not_found_and_reports_conflict(
         "安达", anda_statuses
     )
     monkeypatch.setattr(
-        "anda_tracker.web.services.ChaoHongQueryService",
+        "g_team_ops.web.services.ChaoHongQueryService",
         lambda _client: FakeService("超鸿", chaohong_statuses),
     )
 
@@ -813,15 +813,15 @@ def test_manual_query_reuses_ten_minute_validation_and_anda_login(
         raise NetworkError("超鸿暂时不可用")
 
     monkeypatch.setattr(
-        "anda_tracker.web.services.AndaClient.login",
+        "g_team_ops.web.services.AndaClient.login",
         fake_anda_login,
     )
     monkeypatch.setattr(
-        "anda_tracker.web.services.AndaClient.query_batch",
+        "g_team_ops.web.services.AndaClient.query_batch",
         fake_anda_query,
     )
     monkeypatch.setattr(
-        "anda_tracker.web.services.ChaoHongClient.query_batch",
+        "g_team_ops.web.services.ChaoHongClient.query_batch",
         fail_chaohong,
     )
 
@@ -865,7 +865,7 @@ def test_temporary_yitong_network_failure_does_not_delete_saved_session(
         database = ProjectDatabase(data_dir / "app.db", account.id)
         database.save_session_token("yitong", "still-valid-token")
         monkeypatch.setattr(
-            "anda_tracker.web.services.ChaoHongClient.query_batch",
+            "g_team_ops.web.services.ChaoHongClient.query_batch",
             lambda _self, _fbas: [],
         )
 
@@ -873,7 +873,7 @@ def test_temporary_yitong_network_failure_does_not_delete_saved_session(
             raise NetworkError("网络暂时不可用")
 
         monkeypatch.setattr(
-            "anda_tracker.web.services.YiTongClient.validate_token",
+            "g_team_ops.web.services.YiTongClient.validate_token",
             fail_for_network,
         )
         statuses = app.state.coordinator.validate_all(account.id)

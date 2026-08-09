@@ -1,4 +1,4 @@
-from anda_tracker.sites import (
+from g_team_ops.sites import (
     discover_sites,
     listing_prefixes,
     normalize_country_code,

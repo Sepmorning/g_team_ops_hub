@@ -8,7 +8,7 @@ from pathlib import Path
 
 import uvicorn
 
-from anda_tracker.web import create_app
+from g_team_ops.web import create_app
 
 
 HOST = "127.0.0.1"
@@ -25,9 +25,9 @@ app = create_app(app_data_dir())
 
 def main() -> None:
     url = f"http://{HOST}:{PORT}"
-    if os.environ.get("FBA_TRACKER_NO_BROWSER") != "1":
+    if os.environ.get("G_TEAM_OPS_NO_BROWSER") != "1":
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
-    print(f"FBA运营工作台已启动：{url}")
+    print(f"G组运营工作台已启动：{url}")
     print("请保持此窗口开启；关闭窗口即停止本机后端。")
     uvicorn.run(app, host=HOST, port=PORT, log_level="info", access_log=False)
 

@@ -1,4 +1,4 @@
-from anda_tracker.tracking_details import (
+from g_team_ops.tracking_details import (
     date_only,
     normalize_tracking_details,
 )

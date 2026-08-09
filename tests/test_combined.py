@@ -1,9 +1,9 @@
-from anda_tracker.combined import (
+from g_team_ops.combined import (
     CombinedQueryService,
     SYSTEM_QUERY_BATCH_SIZE,
     query_in_batches,
 )
-from anda_tracker.models import QueryStatus, TrackingResult
+from g_team_ops.models import QueryStatus, TrackingResult
 
 
 class StubService:

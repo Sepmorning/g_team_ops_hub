@@ -1,5 +1,6 @@
-from anda_tracker.web.app import create_app as compatibility_create_app
-from anda_tracker.web.factory import create_app as factory_create_app
+from g_team_ops.web.app import create_app as compatibility_create_app
+from g_team_ops.web.factory import create_app as factory_create_app
+from fastapi.testclient import TestClient
 
 
 EXPECTED_HTTP_ROUTES = {
@@ -50,6 +51,17 @@ EXPECTED_HTTP_ROUTES = {
 
 def test_legacy_create_app_path_remains_compatible():
     assert compatibility_create_app is factory_create_app
+
+
+def test_g_team_product_identity_is_exposed_by_app_and_health(tmp_path):
+    app = factory_create_app(tmp_path / "data")
+
+    assert app.title == "G组运营工作台"
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "service": "G组运营工作台"}
 
 
 def test_modular_router_refactor_preserves_http_contract(tmp_path):

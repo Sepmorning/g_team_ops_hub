@@ -1,4 +1,4 @@
-"""FBA运营工作台的FastAPI浏览器端。"""
+"""G组运营工作台的FastAPI浏览器端。"""
 
 from .app import create_app
 
