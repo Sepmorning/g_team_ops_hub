@@ -36,7 +36,7 @@ cd FBA_Tracker
 - 安达、超鸿、易通查询与货代冲突检测
 - 多店铺WPS AirScript配置
 - 手动FBA查询并可选回填
-- 从 `US-FBA` 自动读取未完成FBA及货代，优先按指定货代分批查询；仅对明确“未找到”的号码查询其他货代兜底，再统一回填
+- 从用户选择站点的 `国家代码-FBA` 子表自动读取未完成FBA及货代，优先按指定货代分批查询；仅对明确“未找到”的号码查询其他货代兜底，再统一回填
 - 统一解析三家货代完整轨迹，将当前快照写入主表，并把预计、实际、变更、异常、恢复和POD逐事件追加到 `US-轨迹明细`；同步后清理已经不活跃货件的明细行
 - 主表和明细表按表头名称自动识别列，列顺序任意，店铺、备注等自定义列不受影响
 - 主表本次真实更新单元格使用“矢车菊蓝，着色1，浅色80%”标记，网页同步列出单元格地址、表头及新旧值；轨迹明细表不着色
@@ -89,7 +89,19 @@ FbaTrackerWeb.exe
 ```text
 anda_fba_tracker/
 ├─ anda_tracker/
-│  ├─ web/                 FastAPI路由、页面和静态资源
+│  ├─ modules/             按业务能力拆分的FastAPI功能路由
+│  │  ├─ accounts/         登录、密码和账号管理
+│  │  ├─ carrier_connections/ 货代账号、验证码和连接状态
+│  │  ├─ shops/            店铺、模块连接和国家站点映射
+│  │  ├─ tracking/         手动物流查询和店铺一键更新
+│  │  └─ inventory/        Listing库存销售导入与更新
+│  ├─ web/
+│  │  ├─ app.py            兼容入口，仅导出create_app
+│  │  ├─ factory.py        FastAPI应用装配和模块注册
+│  │  ├─ context.py        用户、数据库、模板和安全公共依赖
+│  │  ├─ services.py       现有物流查询协调服务（后续分阶段拆分）
+│  │  ├─ templates/        Jinja2页面
+│  │  └─ static/           公共CSS和JavaScript
 │  ├─ airscript.py         WPS AirScript客户端
 │  ├─ listing.py           领星文件解析与Listing AirScript客户端
 │  ├─ sites.py             国家站点命名识别与安全映射
@@ -109,6 +121,10 @@ anda_fba_tracker/
 ├─ build_web_exe.ps1       EXE构建脚本
 └─ FbaTrackerWeb.exe
 ```
+
+项目采用模块化单体。新增模块的目录、边界、测试和前端约束统一见
+[架构与模块开发规范.md](架构与模块开发规范.md)，不得把新业务路由重新写入
+`web/app.py`或`web/factory.py`。
 
 ## 数据和安全
 

@@ -90,10 +90,11 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
             ),
         )
         monkeypatch.setattr(
-            "anda_tracker.web.app.parse_listing_export", lambda _data: parsed
+            "anda_tracker.modules.inventory.router.parse_listing_export",
+            lambda _data: parsed,
         )
         monkeypatch.setattr(
-            "anda_tracker.web.app.ListingAirScriptClient.validate",
+            "anda_tracker.modules.inventory.router.ListingAirScriptClient.validate",
             lambda _self: ListingAirScriptBinding(
                 "纯粹-美国",
                 2,
@@ -107,7 +108,8 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
             return ListingSyncSummary(updated=["SKU-1"])
 
         monkeypatch.setattr(
-            "anda_tracker.web.app.ListingAirScriptClient.sync", fake_sync
+            "anda_tracker.modules.inventory.router.ListingAirScriptClient.sync",
+            fake_sync,
         )
 
         config = client.get(

@@ -244,7 +244,7 @@ def test_saving_and_deleting_one_carrier_preserves_other_recent_statuses(
             instance.token = "new-anda-token"
 
         monkeypatch.setattr(
-            "anda_tracker.web.app.AndaClient.login",
+            "anda_tracker.modules.carrier_connections.router.AndaClient.login",
             fake_login,
         )
         saved = client.post(
@@ -388,7 +388,10 @@ def test_automatic_shop_task_stops_when_required_carrier_is_disconnected(
             def list_pending_tracking_items(self):
                 return [PendingTrackingItem("FBA11111", "易通物流")]
 
-        monkeypatch.setattr("anda_tracker.web.app.AirScriptClient", FakeAirScriptClient)
+        monkeypatch.setattr(
+            "anda_tracker.modules.tracking.router.AirScriptClient",
+            FakeAirScriptClient,
+        )
         validated = {}
 
         def fake_validate(_user_id, required):
@@ -453,7 +456,10 @@ def test_automatic_shop_task_reads_pending_then_queries_and_syncs(tmp_path, monk
                     PendingTrackingItem("FBA22222", "超鸿-美西"),
                 ]
 
-        monkeypatch.setattr("anda_tracker.web.app.AirScriptClient", FakeAirScriptClient)
+        monkeypatch.setattr(
+            "anda_tracker.modules.tracking.router.AirScriptClient",
+            FakeAirScriptClient,
+        )
         called = {}
 
         def fake_query(user_id, items, airscript_config):
@@ -519,7 +525,8 @@ def test_automatic_shop_task_cleans_details_when_no_pending_fba(
                 return AirScriptSyncSummary(detail_rows_removed=7)
 
         monkeypatch.setattr(
-            "anda_tracker.web.app.AirScriptClient", FakeAirScriptClient
+            "anda_tracker.modules.tracking.router.AirScriptClient",
+            FakeAirScriptClient,
         )
         response = client.post(
             f"/api/shops/{shop.id}/tracking-sync",
@@ -568,7 +575,7 @@ def test_shop_discovery_saves_sites_with_one_stable_listing_prefix(
                 ]
 
         monkeypatch.setattr(
-            "anda_tracker.web.app.ListingAirScriptClient",
+            "anda_tracker.modules.shops.router.ListingAirScriptClient",
             FakeListingAirScriptClient,
         )
         response = client.post(
