@@ -195,7 +195,7 @@ def test_member_page_never_contains_admin_carrier_when_member_has_no_config(tmp_
         }
 
 
-def test_only_tracking_page_starts_live_carrier_check_on_page_open(tmp_path):
+def test_tracking_page_only_reads_cached_carrier_status_on_page_open(tmp_path):
     app = create_app(tmp_path / "data")
     with TestClient(app) as client:
         bootstrap_and_login(client)
@@ -203,13 +203,16 @@ def test_only_tracking_page_starts_live_carrier_check_on_page_open(tmp_path):
         tracking = client.get("/tracking")
         assert "initializeCarrierPage();" in carriers.text
         assert "本页面不会自动登录货代" in carriers.text
-        assert "正在后台自动登录或检查三家货代" in tracking.text
+        assert "打开页面只读取状态" in tracking.text
+        assert "不会自动登录或访问货代网站" in tracking.text
         assert "本次共享表更新明细" in tracking.text
         assert "updated_cells" in tracking.text
         assert "仅“物流最后更新时间”刷新，未标蓝" in tracking.text
-        assert "\ncheckCarriers(null,true).catch(()=>{});" in tracking.text
+        assert "\ncheckCarriers(null,'status').catch(()=>{});" in tracking.text
+        assert "checkCarriers(null,'cached')" in tracking.text
+        assert "checkCarriers(this,'force')" in tracking.text
         assert "未检查" in carriers.text
-        assert "待实时检查" in tracking.text
+        assert "读取中" in tracking.text
         assert 'id="ytUser" name="carrier_yitong_account" readonly' in carriers.text
         assert 'id="ytPass" name="carrier_yitong_secret" type="password" readonly' in carriers.text
         assert 'autocomplete="new-password"' in carriers.text
@@ -295,8 +298,8 @@ def test_carrier_status_read_is_side_effect_free_and_validation_uses_post(
                 )
             ]
 
-        def fake_validate(user_id):
-            calls.append(("validate", user_id))
+        def fake_validate(user_id, *, force=False):
+            calls.append(("validate", user_id, force))
             return [CarrierConnectionStatus("安达", True, "登录成功")]
 
         app.state.coordinator.configured_status = fake_configured
@@ -310,14 +313,22 @@ def test_carrier_status_read_is_side_effect_free_and_validation_uses_post(
             "/api/carriers/validation",
             headers={"X-CSRF-Token": csrf},
         )
+        cached_validation = client.post(
+            "/api/carriers/validation?force=0",
+            headers={"X-CSRF-Token": csrf},
+        )
 
         assert snapshot.status_code == 200
         assert snapshot.json()["statuses"][0]["checked"] is False
         assert validation.status_code == 200
         assert validation.json()["statuses"][0]["checked"] is True
-        assert [name for name, _user_id in calls] == [
-            "configured",
-            "validate",
+        assert validation.json()["cache_ttl_seconds"] == 600
+        assert cached_validation.status_code == 200
+        user_id = calls[0][1]
+        assert calls == [
+            ("configured", user_id),
+            ("validate", user_id, True),
+            ("validate", user_id, False),
         ]
 
 
@@ -768,7 +779,7 @@ def test_routed_query_falls_back_only_for_not_found_and_reports_conflict(
     assert response.results[4].carrier == "易通"
 
 
-def test_manual_query_uses_only_live_connected_carriers_and_reuses_anda_login(
+def test_manual_query_reuses_ten_minute_validation_and_anda_login(
     tmp_path, monkeypatch
 ):
     database_path = tmp_path / "app.db"
@@ -809,10 +820,15 @@ def test_manual_query_uses_only_live_connected_carriers_and_reuses_anda_login(
 
     statuses = coordinator.validate_all("member")
     assert [item.connected for item in statuses] == [True, False, False]
+    assert not any(item.cached for item in statuses)
     assert all(item.checked for item in coordinator.configured_status("member"))
     assert all(
         not item.checked for item in coordinator.configured_status("other-member")
     )
+
+    cached_statuses = coordinator.validate_all("member")
+    assert all(item.cached for item in cached_statuses)
+    assert login_calls == [("anda-user", "anda-password")]
 
     response = coordinator.query("member", ["FBA12345678"])
     assert response.results[0].status == QueryStatus.SUCCESS
@@ -821,6 +837,13 @@ def test_manual_query_uses_only_live_connected_carriers_and_reuses_anda_login(
     recent_statuses = coordinator.configured_status("member")
     assert [item.connected for item in recent_statuses] == [True, False, False]
     assert all(item.checked for item in recent_statuses)
+
+    forced_statuses = coordinator.validate_all("member", force=True)
+    assert not any(item.cached for item in forced_statuses)
+    assert login_calls == [
+        ("anda-user", "anda-password"),
+        ("anda-user", "anda-password"),
+    ]
 
 
 def test_temporary_yitong_network_failure_does_not_delete_saved_session(

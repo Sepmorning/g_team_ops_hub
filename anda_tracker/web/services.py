@@ -63,6 +63,7 @@ class CarrierConnectionStatus:
     connected: bool
     message: str
     checked: bool = True
+    cached: bool = False
 
 
 class UnavailableQueryService:
@@ -171,7 +172,10 @@ class QueryCoordinator:
             if not values:
                 self._carrier_status_snapshots.pop(user_id, None)
                 return {}
-            return {key: item for key, (_checked_at, item) in values.items()}
+            return {
+                key: replace(item, cached=True)
+                for key, (_checked_at, item) in values.items()
+            }
 
     def remember_status(
         self, user_id: str, status: CarrierConnectionStatus
@@ -700,17 +704,48 @@ class QueryCoordinator:
             for item in configured
         ]
 
-    def validate_all(self, user_id: str) -> list[CarrierConnectionStatus]:
-        return self.validate_required(user_id, set(CARRIER_DEFINITIONS))
+    def validate_all(
+        self, user_id: str, *, force: bool = False
+    ) -> list[CarrierConnectionStatus]:
+        return self.validate_required(
+            user_id,
+            set(CARRIER_DEFINITIONS),
+            force=force,
+        )
 
     def validate_required(
-        self, user_id: str, required: set[str]
+        self,
+        user_id: str,
+        required: set[str],
+        *,
+        force: bool = False,
     ) -> list[CarrierConnectionStatus]:
-        """并行验证需要的货代；未使用货代不发送网络请求。"""
+        """优先复用十分钟状态；仅联网验证缺失、过期或强制检查的货代。"""
         required = set(required) & set(CARRIER_DEFINITIONS)
         if not required:
             return []
         with self._user_lock(user_id):
+            cached_statuses = {} if force else {
+                key: item
+                for key, item in self._status_snapshot(user_id).items()
+                if key in required
+            }
+            to_validate = required - set(cached_statuses)
+            if not to_validate:
+                statuses = [
+                    cached_statuses[key]
+                    for key in CARRIER_DEFINITIONS
+                    if key in cached_statuses
+                ]
+                if required == set(CARRIER_DEFINITIONS):
+                    self._store_validated_carriers(user_id, statuses)
+                logger.info(
+                    "carrier_validation_cache_hit user=%s total=%d",
+                    user_id,
+                    len(statuses),
+                )
+                return statuses
+
             database = ProjectDatabase(self.database_path, profile_id=user_id)
 
             def validate_anda() -> CarrierConnectionStatus:
@@ -784,30 +819,37 @@ class QueryCoordinator:
                 "yitong": validate_yitong,
             }
             with ThreadPoolExecutor(
-                max_workers=len(required),
+                max_workers=len(to_validate),
                 thread_name_prefix="carrier-validation",
             ) as executor:
                 futures = {
                     key: executor.submit(validators[key])
-                    for key in required
+                    for key in to_validate
                 }
-                statuses_by_key = {
+                checked_statuses = {
                     key: future.result()
                     for key, future in futures.items()
                 }
+            self._store_status_snapshot(
+                user_id,
+                list(checked_statuses.values()),
+            )
+            statuses_by_key = {**cached_statuses, **checked_statuses}
             statuses = [
                 statuses_by_key[key]
                 for key in CARRIER_DEFINITIONS
                 if key in statuses_by_key
             ]
-            self._store_status_snapshot(user_id, statuses)
             if required == set(CARRIER_DEFINITIONS):
                 self._store_validated_carriers(user_id, statuses)
             logger.info(
-                "carrier_validation_complete user=%s connected=%d total=%d",
+                "carrier_validation_complete user=%s connected=%d total=%d live=%d cached=%d force=%s",
                 user_id,
                 sum(item.connected for item in statuses),
                 len(statuses),
+                len(checked_statuses),
+                len(cached_statuses),
+                force,
             )
             return statuses
 

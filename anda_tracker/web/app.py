@@ -31,6 +31,7 @@ from ..parser import parse_fba_input
 from ..storage import ProjectDatabase, protect_secret, unprotect_secret
 from ..sites import discover_sites, listing_prefixes, normalize_sheet_name
 from .services import (
+    CARRIER_STATUS_SNAPSHOT_TTL_SECONDS,
     CaptchaRegistry,
     CarrierConnectionStatus,
     QueryCoordinator,
@@ -542,9 +543,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "connected": item.connected,
                     "message": item.message,
                     "checked": item.checked,
+                    "cached": item.cached,
                 }
                 for item in statuses
             ],
+            "cache_ttl_seconds": CARRIER_STATUS_SNAPSHOT_TTL_SECONDS,
         }
 
     @app.post("/api/carriers/validation")
@@ -552,9 +555,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         """执行有网络副作用的货代登录与连接验证。"""
         account = require_api_user(request)
         _check_csrf(request, request.headers.get("X-CSRF-Token"))
+        force = request.query_params.get("force", "1").lower() not in {
+            "0",
+            "false",
+            "no",
+        }
         statuses = await asyncio.to_thread(
             coordinator.validate_all,
             account.id,
+            force=force,
         )
         return {
             "ok": True,
@@ -564,9 +573,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     "connected": item.connected,
                     "message": item.message,
                     "checked": item.checked,
+                    "cached": item.cached,
                 }
                 for item in statuses
             ],
+            "cache_ttl_seconds": CARRIER_STATUS_SNAPSHOT_TTL_SECONDS,
         }
 
     @app.get("/api/carriers/credentials")
@@ -1468,6 +1479,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "connected": item.connected,
                 "message": item.message,
                 "checked": item.checked,
+                "cached": item.cached,
             }
             for item in statuses
         ]
