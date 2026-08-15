@@ -103,8 +103,30 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
         )
         sync_calls = {}
 
-        def fake_sync(_self, rows, data_date):
+        before = [{
+            "targetType": "cell",
+            "sheetName": "纯粹-美国",
+            "matchHeader": "MSKU",
+            "matchValue": "SKU-1",
+            "itemKey": "SKU-1",
+            "field": "rating",
+            "cellAddress": "H3",
+            "value": 4.3,
+            "comparableValue": "4.3",
+        }]
+        after = [{**before[0], "value": 4.4, "comparableValue": "4.4"}]
+        monkeypatch.setattr(
+            "g_team_ops.modules.inventory.router.ListingAirScriptClient.snapshot_rows",
+            lambda _self, _rows: before,
+        )
+        monkeypatch.setattr(
+            "g_team_ops.modules.inventory.router.ListingAirScriptClient.snapshot_targets",
+            lambda _self, _targets: after,
+        )
+
+        def fake_sync(_self, rows, data_date, preconditions=None):
             sync_calls.update(rows=rows, data_date=data_date)
+            assert preconditions == before
             return ListingSyncSummary(updated=["SKU-1"])
 
         monkeypatch.setattr(
@@ -147,5 +169,6 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
         )
         assert applied.status_code == 200
         assert applied.json()["summary"]["updated"] == ["SKU-1"]
+        assert applied.json()["operation"]["reversible"] is True
         assert sync_calls["data_date"] == "2026-07-26"
         assert sync_calls["rows"][0].reserved == 5

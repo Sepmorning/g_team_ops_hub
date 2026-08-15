@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const HEADER_END_COLUMN = "CZ";
 const MAX_HEADER_ROW = 12;
 const MAX_SCAN_ROW = 20000;
@@ -86,6 +86,32 @@ const ROLL_FIELDS = [
         current: "sales_30d",
         previous: "previous_sales_30d"
     }
+];
+
+const LISTING_WRITABLE_FIELDS = [
+    "current_data_date",
+    "previous_data_date",
+    "rating",
+    "review_count",
+    "previous_rating",
+    "previous_review_count",
+    "yesterday_ad_spend",
+    "previous_yesterday_ad_spend",
+    "fba_available",
+    "reserved",
+    "inbound",
+    "previous_fba_available",
+    "previous_reserved",
+    "previous_inbound",
+    "sales_7d",
+    "sales_14d",
+    "sales_30d",
+    "previous_sales_7d",
+    "previous_sales_14d",
+    "previous_sales_30d",
+    "final_monthly_sales",
+    "discount_price",
+    "updated_at"
 ];
 
 function displayText(value) {
@@ -435,13 +461,273 @@ function writeFields(sheet, columns, writesByField, states) {
     }
 }
 
+function scalarValue(range) {
+    const values = firstRowValues(range.Value2);
+    return values.length > 0 ? values[0] : "";
+}
+
+function comparableListingValue(field, value) {
+    if (field === "current_data_date" || field === "previous_data_date") {
+        return normalizedDate(value);
+    }
+    return displayText(value);
+}
+
+function listingSnapshotEntry(sheet, columns, msku, row, field) {
+    const column = columns[field];
+    const address = column.columnLetter + row;
+    const value = scalarValue(sheet.Range(address));
+    return {
+        targetType: "cell",
+        sheetName: displayText(sheet.Name),
+        matchHeader: columns.msku.text,
+        matchValue: msku,
+        itemKey: msku,
+        field: field,
+        header: column.text,
+        cellAddress: address,
+        value: value,
+        comparableValue: comparableListingValue(field, value)
+    };
+}
+
+function collectListingSnapshots(
+    sheet,
+    columns,
+    headerRow,
+    snapshotItems
+) {
+    const lastRow = lastUsedRow(sheet, headerRow);
+    const rowsByMsku = buildRowsByMsku(sheet, columns, headerRow, lastRow);
+    const seen = Object.create(null);
+    const snapshots = [];
+    for (let itemIndex = 0; itemIndex < snapshotItems.length; itemIndex++) {
+        const source = snapshotItems[itemIndex];
+        const msku = normalizeMsku(source && source.msku);
+        if (msku === "" || seen[msku]) {
+            continue;
+        }
+        seen[msku] = true;
+        const rows = rowsByMsku[msku] || [];
+        if (rows.length !== 1) {
+            continue;
+        }
+        for (
+            let fieldIndex = 0;
+            fieldIndex < LISTING_WRITABLE_FIELDS.length;
+            fieldIndex++
+        ) {
+            const field = LISTING_WRITABLE_FIELDS[fieldIndex];
+            if (!columns[field]) {
+                continue;
+            }
+            snapshots.push(
+                listingSnapshotEntry(sheet, columns, msku, rows[0], field)
+            );
+        }
+    }
+    return snapshots;
+}
+
+function currentListingSnapshot(
+    sheet,
+    columns,
+    headerRow,
+    target,
+    rowsByMsku
+) {
+    if (
+        displayText(target && target.targetType).toLowerCase() !== "cell" ||
+        normalizeHeader(target && target.sheetName) !== normalizeHeader(sheet.Name)
+    ) {
+        throw new Error("恢复目标不属于当前Listing子表");
+    }
+    const field = displayText(target.field);
+    if (!columns[field] || LISTING_WRITABLE_FIELDS.indexOf(field) < 0) {
+        throw new Error("恢复目标不是Listing系统可写字段：" + field);
+    }
+    const msku = normalizeMsku(target.matchValue);
+    const rowMap = rowsByMsku || buildRowsByMsku(
+        sheet,
+        columns,
+        headerRow,
+        lastUsedRow(sheet, headerRow)
+    );
+    const rows = rowMap[msku] || [];
+    if (rows.length !== 1) {
+        throw new Error(
+            "MSKU在Listing子表中不是唯一一行：" + displayText(target.matchValue)
+        );
+    }
+    return listingSnapshotEntry(sheet, columns, msku, rows[0], field);
+}
+
+function sameComparable(left, right) {
+    return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function verifyListingPreconditions(
+    sheet,
+    columns,
+    headerRow,
+    preconditions
+) {
+    const rowsByMsku = buildRowsByMsku(
+        sheet,
+        columns,
+        headerRow,
+        lastUsedRow(sheet, headerRow)
+    );
+    for (let index = 0; index < preconditions.length; index++) {
+        const expected = preconditions[index];
+        const current = currentListingSnapshot(
+            sheet, columns, headerRow, expected, rowsByMsku
+        );
+        const expectedComparable = Object.prototype.hasOwnProperty.call(
+            expected, "comparableValue"
+        ) ? expected.comparableValue : comparableListingValue(
+            expected.field, expected.value
+        );
+        if (!sameComparable(current.comparableValue, expectedComparable)) {
+            throw new Error(
+                "共享表在写前快照后发生变化：" +
+                displayText(expected.matchValue) + " / " +
+                displayText(expected.header || expected.field) +
+                "。本次已停止，未覆盖新值"
+            );
+        }
+    }
+}
+
+function inspectListingChanges(
+    sheet,
+    columns,
+    headerRow,
+    changes,
+    direction,
+    indexOffset
+) {
+    const result = {
+        ready: [],
+        alreadyApplied: [],
+        conflicts: [],
+        failures: []
+    };
+    const rowsByMsku = buildRowsByMsku(
+        sheet,
+        columns,
+        headerRow,
+        lastUsedRow(sheet, headerRow)
+    );
+    for (let index = 0; index < changes.length; index++) {
+        const change = changes[index] && typeof changes[index] === "object"
+            ? changes[index] : {};
+        const globalIndex = indexOffset + index;
+        try {
+            const current = currentListingSnapshot(
+                sheet, columns, headerRow, change, rowsByMsku
+            );
+            const expectedValue = direction === "rollback"
+                ? change.newValue : change.oldValue;
+            const desiredValue = direction === "rollback"
+                ? change.oldValue : change.newValue;
+            const expectedComparable = comparableListingValue(
+                change.field, expectedValue
+            );
+            const desiredComparable = comparableListingValue(
+                change.field, desiredValue
+            );
+            const item = {
+                index: globalIndex,
+                itemKey: displayText(change.itemKey || change.matchValue),
+                matchValue: displayText(change.matchValue),
+                field: displayText(change.field),
+                header: displayText(change.header || current.header),
+                cellAddress: current.cellAddress,
+                currentValue: current.value,
+                expectedValue: expectedValue,
+                desiredValue: desiredValue
+            };
+            if (sameComparable(current.comparableValue, expectedComparable)) {
+                result.ready.push(item);
+            } else if (
+                sameComparable(current.comparableValue, desiredComparable)
+            ) {
+                result.alreadyApplied.push(item);
+            } else {
+                result.conflicts.push(item);
+            }
+        } catch (error) {
+            result.failures.push({
+                index: globalIndex,
+                itemKey: displayText(change.itemKey || change.matchValue),
+                matchValue: displayText(change.matchValue),
+                field: displayText(change.field),
+                message: displayText(error && error.message ? error.message : error)
+            });
+        }
+    }
+    return result;
+}
+
+function applyListingChanges(
+    sheet,
+    columns,
+    headerRow,
+    changes,
+    direction,
+    indexOffset
+) {
+    const inspected = inspectListingChanges(
+        sheet, columns, headerRow, changes, direction, indexOffset
+    );
+    const result = {
+        applied: [],
+        alreadyApplied: inspected.alreadyApplied,
+        conflicts: inspected.conflicts,
+        failures: inspected.failures
+    };
+    for (let readyIndex = 0; readyIndex < inspected.ready.length; readyIndex++) {
+        const ready = inspected.ready[readyIndex];
+        try {
+            const range = sheet.Range(ready.cellAddress);
+            if (
+                ready.field === "current_data_date" ||
+                ready.field === "previous_data_date" ||
+                ready.field === "updated_at"
+            ) {
+                range.NumberFormat = "@";
+            }
+            range.Value2 = ready.desiredValue;
+            result.applied.push(ready);
+        } catch (error) {
+            result.failures.push({
+                index: ready.index,
+                itemKey: ready.itemKey,
+                matchValue: ready.matchValue,
+                field: ready.field,
+                message: displayText(error && error.message ? error.message : error)
+            });
+        }
+    }
+    return result;
+}
+
 const argv = Context && Context.argv ? Context.argv : {};
 const action = normalizeHeader(argv.action || "validate").toLowerCase();
 const sheetName = displayText(argv.sheet_name);
 const dataDate = normalizedDate(argv.data_date);
 const items = Array.isArray(argv.items) ? argv.items : [];
 
-if (action !== "discover" && action !== "validate" && action !== "sync") {
+if (
+    action !== "discover" &&
+    action !== "validate" &&
+    action !== "sync" &&
+    action !== "snapshot" &&
+    action !== "snapshot_targets" &&
+    action !== "inspect_changes" &&
+    action !== "apply_changes"
+) {
     throw new Error("不支持的Listing操作：" + action);
 }
 if (action === "discover") {
@@ -480,6 +766,60 @@ if (action === "validate") {
     console.log(JSON.stringify(baseResult));
     return baseResult;
 }
+
+if (action === "snapshot") {
+    const snapshotResult = Object.assign(baseResult, {
+        snapshots: collectListingSnapshots(
+            targetSheet, columns, headerRow, items
+        )
+    });
+    console.log(JSON.stringify(snapshotResult));
+    return snapshotResult;
+}
+
+if (action === "snapshot_targets") {
+    const targets = Array.isArray(argv.targets) ? argv.targets : [];
+    const rowsByMsku = buildRowsByMsku(
+        targetSheet,
+        columns,
+        headerRow,
+        lastUsedRow(targetSheet, headerRow)
+    );
+    const snapshots = targets.map(function (target) {
+        return currentListingSnapshot(
+            targetSheet, columns, headerRow, target, rowsByMsku
+        );
+    });
+    const targetResult = Object.assign(baseResult, { snapshots: snapshots });
+    console.log(JSON.stringify(targetResult));
+    return targetResult;
+}
+
+if (action === "inspect_changes" || action === "apply_changes") {
+    const changes = Array.isArray(argv.changes) ? argv.changes : [];
+    const direction = displayText(argv.direction).toLowerCase();
+    if (direction !== "rollback" && direction !== "forward") {
+        throw new Error("变更方向无效");
+    }
+    const indexOffset = Math.max(0, Number(argv.index_offset) || 0);
+    const changeResult = action === "inspect_changes"
+        ? inspectListingChanges(
+            targetSheet, columns, headerRow, changes, direction, indexOffset
+        )
+        : applyListingChanges(
+            targetSheet, columns, headerRow, changes, direction, indexOffset
+        );
+    const response = Object.assign(baseResult, changeResult);
+    console.log(JSON.stringify(response));
+    return response;
+}
+
+verifyListingPreconditions(
+    targetSheet,
+    columns,
+    headerRow,
+    Array.isArray(argv.preconditions) ? argv.preconditions : []
+);
 
 const updated = [];
 const sameDateUpdated = [];

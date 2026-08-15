@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}操作历史 · G组运营工作台{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>操作历史与恢复</h1>
+    <p>按用户、店铺和模块记录写前快照、实际变更、冲突与恢复结果。</p>
+  </div>
+  <span class="badge">双重恢复保险</span>
+</header>
+
+<div id="operationStatus" class="status"></div>
+
+<section class="card">
+  <h3>共享表写入批次</h3>
+  <p class="muted">
+    “恢复上一次操作”只恢复当前值仍等于本批次写入值的项目；人工或后续修改会作为冲突跳过。
+    必须按同一店铺、同一模块从最新批次向前恢复。
+  </p>
+  <div style="overflow:auto">
+    <table>
+      <thead><tr><th>时间</th><th>模块</th><th>操作</th><th>状态</th><th>变更</th><th>摘要</th><th>恢复</th></tr></thead>
+      <tbody>
+      {% for item in operations %}
+        <tr>
+          <td>{{ item.created_at }}</td>
+          <td>{{ item.module_name }}</td>
+          <td>{{ item.operation_type }}</td>
+          <td>{{ item.status }}</td>
+          <td>{{ item.summary.get('change_count', 0) if item.summary else 0 }}</td>
+          <td>{{ item.error_message or item.summary }}</td>
+          <td>
+            {% if item.reversible and item.status in ['applied', 'partial', 'reconciled'] and not item.rollback_of_batch_id %}
+            <button class="btn small" type="button" onclick="previewRestore(this, '{{ item.id }}')">选择并恢复</button>
+            {% elif item.rollback_of_batch_id and item.status in ['rollback_partial', 'uncertain'] %}
+            <button class="btn small" type="button" onclick="previewRestore(this, '{{ item.rollback_of_batch_id }}')">继续恢复</button>
+            {% elif item.status == 'uncertain' %}
+            <button class="btn small" type="button" onclick="previewReconcile(this, '{{ item.id }}')">核对实际结果</button>
+            {% elif item.status in ['running', 'rollback_running'] %}
+            <button class="btn small danger" type="button" onclick="takeOverTask(this, '{{ item.id }}')">接管中断任务</button>
+            {% else %}
+            <span class="muted">—</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7">尚无操作历史。新版物流或Listing共享表写入后会在这里形成审计批次。</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="restoreSelectionPanel" class="card" style="margin-top:18px" hidden>
+  <div class="page-head">
+    <div>
+      <h3>选择要恢复的项目</h3>
+      <p id="restoreSelectionSummary" class="muted"></p>
+    </div>
+    <div>
+      <button id="cancelSelectedRestore" class="btn" type="button">取消</button>
+      <button id="applySelectedRestore" class="btn primary" type="button">恢复选中项</button>
+    </div>
+  </div>
+  <div style="overflow:auto">
+    <table>
+      <thead><tr><th>选择</th><th>项目</th><th>工作表</th><th>字段</th><th>当前写入值</th><th>恢复目标值</th></tr></thead>
+      <tbody id="restoreSelectionRows"></tbody>
+    </table>
+  </div>
+  <p class="muted">只列出当前值仍等于本批次写入值的安全项目；冲突项不会出现在可选列表，也不会被覆盖。</p>
+</section>
+
+{% if account.is_admin %}
+<section class="card" style="margin-top:18px">
+  <div class="page-head">
+    <div><h3>本机数据库备份</h3><p>备份保存在本机data/backups，不会提交Git。</p></div>
+    <button id="createBackup" class="btn primary" type="button">立即创建备份</button>
+  </div>
+  <div class="status show {{ 'ok' if backup_health and backup_health.ok else 'error' }}">
+    备份健康：{{ backup_health.message if backup_health else '无法取得备份健康状态' }}
+    {% if backup_health and backup_health.latest %}
+    （最近：{{ backup_health.latest.file_name }}，{{ backup_health.latest.created_at }}）
+    {% endif %}
+  </div>
+  <div id="backupStatus" class="status"></div>
+  <div style="overflow:auto">
+    <table>
+      <thead><tr><th>时间</th><th>文件</th><th>大小</th><th>原因</th><th>完整性</th><th>校验</th></tr></thead>
+      <tbody>
+      {% for item in backups %}
+        <tr><td>{{ item.created_at }}</td><td>{{ item.file_name }}</td><td>{{ item.size_bytes }}</td><td>{{ item.reason }}</td><td>{{ item.integrity_result }}</td><td><button class="btn small" type="button" onclick="verifyBackup(this, '{{ item.id }}')">完整校验</button></td></tr>
+      {% else %}
+        <tr><td colspan="6">尚无数据库备份。</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted" style="margin-top:14px">
+    正式数据库只能在完全关闭Web服务后，通过独立维护程序恢复；网页不会在线替换app.db。
+  </p>
+  {% if database_restores %}
+  <h3 style="margin-top:18px">整库恢复历史</h3>
+  <div style="overflow:auto">
+    <table>
+      <thead><tr><th>恢复时间</th><th>来源备份</th><th>恢复前保险备份</th><th>结果</th></tr></thead>
+      <tbody>{% for item in database_restores %}<tr><td>{{ item.restored_at }}</td><td>{{ item.backup_file_name }}</td><td>{{ item.safety_backup_file_name }}</td><td>{{ item.result }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+const operationStatus=document.getElementById('operationStatus');
+const requestKey=()=>globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const restoreSelectionPanel=document.getElementById('restoreSelectionPanel');
+const restoreSelectionRows=document.getElementById('restoreSelectionRows');
+const restoreSelectionSummary=document.getElementById('restoreSelectionSummary');
+const applySelectedRestore=document.getElementById('applySelectedRestore');
+let restoreSelectionBatchId='';
+const formatValue=value=>{
+  if(value===null)return '空值';
+  if(typeof value==='object')return JSON.stringify(value);
+  return String(value??'');
+};
+function hideRestoreSelection(){
+  restoreSelectionBatchId='';
+  restoreSelectionRows.replaceChildren();
+  restoreSelectionPanel.hidden=true;
+}
+function renderRestoreSelection(batchId,preview){
+  restoreSelectionBatchId=batchId;
+  restoreSelectionRows.replaceChildren();
+  for(const item of preview.ready||[]){
+    if(!item.change_id)continue;
+    const row=document.createElement('tr');
+    const choice=document.createElement('input');
+    choice.type='checkbox';choice.checked=true;choice.value=item.change_id;choice.className='restore-choice';
+    const values=[choice,item.item_key||'—',item.sheet_name||'—',item.field_name||'—',formatValue(item.new_value),formatValue(item.old_value)];
+    for(const value of values){const cell=document.createElement('td');if(value instanceof Node)cell.appendChild(value);else cell.textContent=value;row.appendChild(cell)}
+    restoreSelectionRows.appendChild(row);
+  }
+  const ready=preview.ready?.length||0,already=preview.already_applied?.length||0,conflicts=preview.conflicts?.length||0,failures=preview.failures?.length||0;
+  restoreSelectionSummary.textContent=`可安全恢复 ${ready} 项，已经是旧值 ${already} 项，冲突 ${conflicts} 项，检查失败 ${failures} 项。`;
+  restoreSelectionPanel.hidden=false;
+  restoreSelectionPanel.scrollIntoView({behavior:'smooth',block:'start'});
+}
+async function previewRestore(button,batchId){
+  GTeam.buttonBusy(button,true,'正在检查…');
+  try{
+    const preview=await GTeam.api(`/api/operations/${batchId}/restore-preview`,{method:'POST',body:{}});
+    const ready=preview.ready?.length||0,already=preview.already_applied?.length||0,conflicts=preview.conflicts?.length||0,failures=preview.failures?.length||0;
+    const note=`可恢复 ${ready} 项，已经是旧值 ${already} 项，冲突 ${conflicts} 项，检查失败 ${failures} 项。`;
+    if(!ready){hideRestoreSelection();GTeam.showStatus(operationStatus,`${note} 当前没有可安全恢复的内容。`,'error');return}
+    renderRestoreSelection(batchId,preview);
+    GTeam.showStatus(operationStatus,`${note} 请在下方选择本次要恢复的项目。`,'info');
+  }catch(error){GTeam.showStatus(operationStatus,error.message,'error')}
+  finally{GTeam.buttonBusy(button,false)}
+}
+document.getElementById('cancelSelectedRestore').addEventListener('click',hideRestoreSelection);
+applySelectedRestore.addEventListener('click',async function(){
+  const changeIds=[...document.querySelectorAll('.restore-choice:checked')].map(item=>item.value);
+  if(!changeIds.length){GTeam.showStatus(operationStatus,'请至少选择一个要恢复的项目。','error');return}
+  if(!confirm(`将恢复选中的 ${changeIds.length} 项。仅在当前值仍等于原操作写入值时执行，是否继续？`))return;
+  GTeam.buttonBusy(this,true,'正在恢复…');
+  try{
+    const result=await GTeam.api(`/api/operations/${restoreSelectionBatchId}/restore`,{method:'POST',headers:{'Idempotency-Key':requestKey()},body:{change_ids:changeIds}});
+    const hasIssue=(result.summary?.conflicts?.length||result.summary?.failures?.length||result.summary?.remaining_conflicts?.length||result.summary?.remaining_failures?.length);
+    GTeam.showStatus(operationStatus,result.message,hasIssue?'error':'ok');
+    setTimeout(()=>location.reload(),900);
+  }catch(error){GTeam.showStatus(operationStatus,error.message,'error')}
+  finally{GTeam.buttonBusy(this,false)}
+});
+async function takeOverTask(button,batchId){
+  const confirmation=prompt('仅当原窗口、请求或程序已经停止时才能接管。请输入“原任务已停止”继续：','');
+  if(confirmation!=='原任务已停止')return;
+  GTeam.buttonBusy(button,true,'正在接管…');
+  try{
+    const result=await GTeam.api(`/api/operations/${batchId}/take-over`,{method:'POST',body:{confirm:confirmation}});
+    GTeam.showStatus(operationStatus,result.message,'info');
+    setTimeout(()=>location.reload(),900);
+  }catch(error){GTeam.showStatus(operationStatus,error.message,'error')}
+  finally{GTeam.buttonBusy(button,false)}
+}
+async function previewReconcile(button,batchId){
+  GTeam.buttonBusy(button,true,'正在只读核对…');
+  try{
+    const preview=await GTeam.api(`/api/operations/${batchId}/reconcile-preview`,{method:'POST',body:{}});
+    const note=`已检查 ${preview.snapshot_count||0} 项写前快照，当前有 ${preview.changed_count||0} 项与写前值不同。`;
+    if(!confirm(`${note}\n\n确认后只记录实际差异并更新审计状态，不会修改WPS共享表。是否继续？`))return;
+    GTeam.buttonBusy(button,true,'正在确认…');
+    const result=await GTeam.api(`/api/operations/${batchId}/reconcile`,{method:'POST',body:{}});
+    GTeam.showStatus(operationStatus,result.message,'ok');
+    setTimeout(()=>location.reload(),900);
+  }catch(error){GTeam.showStatus(operationStatus,error.message,'error')}
+  finally{GTeam.buttonBusy(button,false)}
+}
+</script>
+{% if account.is_admin %}<script>
+document.getElementById('createBackup').addEventListener('click',async function(){
+  GTeam.buttonBusy(this,true,'备份中…');
+  try{await GTeam.api('/api/backups',{method:'POST',headers:{'Idempotency-Key':requestKey()},body:{reason:'manual'}});location.reload()}
+  catch(error){GTeam.showStatus(document.getElementById('backupStatus'),error.message,'error');GTeam.buttonBusy(this,false)}
+});
+async function verifyBackup(button,backupId){
+  GTeam.buttonBusy(button,true,'校验中…');
+  try{const result=await GTeam.api(`/api/backups/${backupId}/verify`,{method:'POST',body:{}});GTeam.showStatus(document.getElementById('backupStatus'),result.message,'ok')}
+  catch(error){GTeam.showStatus(document.getElementById('backupStatus'),error.message,'error')}
+  finally{GTeam.buttonBusy(button,false)}
+}
+</script>{% endif %}
+{% endblock %}

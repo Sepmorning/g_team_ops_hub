@@ -1,0 +1,1 @@
+G组运营工作台的Alembic迁移脚本。应用启动和Repository初始化时自动升级到head。

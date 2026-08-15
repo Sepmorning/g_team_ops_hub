@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
+from dataclasses import asdict
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from ...airscript import AirScriptClient
+from ...airscript import AirScriptClient, tracking_summary_from_payload
 from ...errors import CarrierError, ConfigurationError
 from ...parser import parse_fba_input
 from ...web.context import WebContext, check_csrf, json_error
@@ -16,10 +18,44 @@ from ...web.services import (
     result_dict,
     summary_dict,
 )
+from ..operations.shared_table import SharedTableOperationManager
 
 
 def build_router(ctx: WebContext) -> APIRouter:
     router = APIRouter()
+    operation_manager = SharedTableOperationManager(ctx.operations)
+
+    def guarded_sync(
+        account_id: str,
+        shop_id: str,
+        country_id: str,
+        config,
+        results,
+        idempotency_key: str,
+        operation_type: str,
+    ):
+        client = AirScriptClient(
+            config,
+            retries=ctx.coordinator.settings.retries,
+        )
+        return operation_manager.execute(
+            profile_id=account_id,
+            module_name="tracking",
+            operation_type=operation_type,
+            shop_id=shop_id,
+            country_id=country_id,
+            idempotency_key=idempotency_key,
+            snapshot_before=lambda: client.snapshot_tracking_results(results),
+            apply=lambda before: client.sync_tracking_results(
+                results,
+                preconditions=before,
+            ),
+            snapshot_after=client.snapshot_targets,
+            serialize_result=asdict,
+            restore_result=tracking_summary_from_payload,
+            is_partial=lambda summary: bool(summary.failures),
+            initial_summary={"queried_count": len(results)},
+        )
 
     @router.get("/tracking", response_class=HTMLResponse)
     async def tracking_page(request: Request):
@@ -56,6 +92,8 @@ def build_router(ctx: WebContext) -> APIRouter:
         if not isinstance(sync_value, bool):
             return json_error("sync_wps必须是布尔值")
         airscript_config = None
+        shop_id = ""
+        country_id = ""
         if sync_value:
             shop_id = str(payload.get("shop_id") or "")
             country_id = str(payload.get("country_id") or "")
@@ -78,6 +116,7 @@ def build_router(ctx: WebContext) -> APIRouter:
                 account.id,
                 parsed.valid,
                 airscript_config,
+                sync_wps=False,
             )
         except (CarrierError, ConfigurationError) as exc:
             return json_error(exc.user_message)
@@ -87,6 +126,30 @@ def build_router(ctx: WebContext) -> APIRouter:
                 account.id,
             )
             return json_error("查询服务发生未预期错误，请稍后重试", 500)
+        operation = None
+        if airscript_config is not None:
+            try:
+                guarded = await asyncio.to_thread(
+                    guarded_sync,
+                    account.id,
+                    shop_id,
+                    country_id,
+                    airscript_config,
+                    response.results,
+                    str(request.headers.get("Idempotency-Key") or secrets.token_urlsafe(18)),
+                    "manual_tracking_sync",
+                )
+                response.wps_summary = guarded.business_result
+                operation = guarded.batch.to_payload()
+            except (CarrierError, ConfigurationError) as exc:
+                response.wps_error = exc.user_message
+            except Exception:
+                ctx.logger.exception(
+                    "manual_tracking_guarded_sync_unexpected user=%s shop=%s",
+                    account.id,
+                    shop_id,
+                )
+                response.wps_error = "物流查询完成，但共享表安全写入发生未预期错误"
         return {
             "ok": True,
             "input": {
@@ -97,6 +160,7 @@ def build_router(ctx: WebContext) -> APIRouter:
             "results": [result_dict(item) for item in response.results],
             "wps": summary_dict(response.wps_summary),
             "wps_error": response.wps_error,
+            "operation": operation,
         }
 
     @router.post("/api/shops/{shop_id}/tracking-sync")
@@ -127,10 +191,17 @@ def build_router(ctx: WebContext) -> APIRouter:
             return json_error(exc.user_message)
         if not pending_items:
             try:
-                cleanup_summary = await asyncio.to_thread(
-                    client.sync_tracking_results,
+                guarded = await asyncio.to_thread(
+                    guarded_sync,
+                    account.id,
+                    shop_id,
+                    country_id,
+                    config,
                     [],
+                    str(request.headers.get("Idempotency-Key") or secrets.token_urlsafe(18)),
+                    "automatic_tracking_cleanup",
                 )
+                cleanup_summary = guarded.business_result
             except (CarrierError, ConfigurationError) as exc:
                 return {
                     "ok": True,
@@ -142,6 +213,7 @@ def build_router(ctx: WebContext) -> APIRouter:
                     "results": [],
                     "wps": None,
                     "wps_error": exc.user_message,
+                    "operation": None,
                 }
             return {
                 "ok": True,
@@ -151,6 +223,7 @@ def build_router(ctx: WebContext) -> APIRouter:
                 "results": [],
                 "wps": summary_dict(cleanup_summary),
                 "wps_error": "",
+                "operation": guarded.batch.to_payload(),
             }
 
         required_carriers = {
@@ -191,6 +264,7 @@ def build_router(ctx: WebContext) -> APIRouter:
                 account.id,
                 pending_items,
                 config,
+                sync_wps=False,
             )
         except (CarrierError, ConfigurationError) as exc:
             return json_error(exc.user_message)
@@ -201,6 +275,29 @@ def build_router(ctx: WebContext) -> APIRouter:
                 shop_id,
             )
             return json_error("自动查询任务发生未预期错误，请稍后重试", 500)
+        operation = None
+        try:
+            guarded = await asyncio.to_thread(
+                guarded_sync,
+                account.id,
+                shop_id,
+                country_id,
+                config,
+                response.results,
+                str(request.headers.get("Idempotency-Key") or secrets.token_urlsafe(18)),
+                "automatic_tracking_sync",
+            )
+            response.wps_summary = guarded.business_result
+            operation = guarded.batch.to_payload()
+        except (CarrierError, ConfigurationError) as exc:
+            response.wps_error = exc.user_message
+        except Exception:
+            ctx.logger.exception(
+                "automatic_tracking_guarded_sync_unexpected user=%s shop=%s",
+                account.id,
+                shop_id,
+            )
+            response.wps_error = "物流查询完成，但共享表安全写入发生未预期错误"
         return {
             "ok": True,
             "message": (
@@ -213,6 +310,7 @@ def build_router(ctx: WebContext) -> APIRouter:
             "results": [result_dict(item) for item in response.results],
             "wps": summary_dict(response.wps_summary),
             "wps_error": response.wps_error,
+            "operation": operation,
         }
 
     return router

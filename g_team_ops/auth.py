@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .errors import ConfigurationError
+from .db.migration import upgrade_database
+from .db.runtime import connect_sqlite
 
 
 PBKDF2_ITERATIONS = 600_000
@@ -102,9 +104,29 @@ class UserRepository:
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
-            if "users" in tables or not tables.intersection(
-                {"carrier_credentials", "airscript_settings", "wps_settings"}
-            ):
+            legacy_tables = tables.intersection(
+                {
+                    "carrier_credentials",
+                    "carrier_sessions",
+                    "airscript_settings",
+                    "wps_settings",
+                    "shops",
+                    "shop_countries",
+                }
+            )
+            if not legacy_tables:
+                return None
+            if "users" in tables and source.execute(
+                "SELECT 1 FROM users LIMIT 1"
+            ).fetchone():
+                return None
+            has_legacy_data = any(
+                source.execute(
+                    f"SELECT 1 FROM {table_name} LIMIT 1"
+                ).fetchone()
+                for table_name in legacy_tables
+            )
+            if not has_legacy_data:
                 return None
             backup_dir = self.path.parent / "backups"
             backup_dir.mkdir(parents=True, exist_ok=True)
@@ -115,31 +137,10 @@ class UserRepository:
             return backup_path
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+        return connect_sqlite(self.path, row_factory=True)
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id TEXT PRIMARY KEY,
-                    username TEXT NOT NULL,
-                    username_normalized TEXT NOT NULL UNIQUE,
-                    display_name TEXT NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
-                    is_active INTEGER NOT NULL DEFAULT 1,
-                    must_change_password INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    last_login_at TEXT
-                )
-                """
-            )
+        upgrade_database(self.path)
 
     @staticmethod
     def _account(row: sqlite3.Row) -> UserAccount:

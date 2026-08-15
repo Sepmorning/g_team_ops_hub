@@ -46,6 +46,18 @@ EXPECTED_HTTP_ROUTES = {
     ("POST", "/api/inventory/countries/{country_id}/validation"),
     ("POST", "/api/inventory/imports/preview"),
     ("POST", "/api/inventory/imports/apply"),
+    ("GET", "/operations"),
+    ("GET", "/api/operations"),
+    ("GET", "/api/operations/{batch_id}"),
+    ("POST", "/api/operations/{batch_id}/restore-preview"),
+    ("POST", "/api/operations/{batch_id}/restore"),
+    ("POST", "/api/operations/{batch_id}/take-over"),
+    ("POST", "/api/operations/{batch_id}/reconcile-preview"),
+    ("POST", "/api/operations/{batch_id}/reconcile"),
+    ("GET", "/api/backups"),
+    ("GET", "/api/backups/health"),
+    ("POST", "/api/backups"),
+    ("POST", "/api/backups/{backup_id}/verify"),
 }
 
 

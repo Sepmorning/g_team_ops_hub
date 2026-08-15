@@ -17,6 +17,7 @@
       <a href="/carriers" class="{{ 'active' if active == 'carriers' else '' }}"><span class="nav-icon">⚙</span><span>货代连接</span></a>
       <a href="/shops" class="{{ 'active' if active == 'shops' else '' }}"><span class="nav-icon">▣</span><span>我的店铺</span></a>
       <a href="/inventory" class="{{ 'active' if active == 'inventory' else '' }}"><span class="nav-icon">▤</span><span>库存销售表格</span></a>
+      <a href="/operations" class="{{ 'active' if active == 'operations' else '' }}"><span class="nav-icon">↶</span><span>操作历史与恢复</span></a>
       {% if account and account.is_admin %}
       <a href="/admin" class="{{ 'active' if active == 'admin' else '' }}"><span class="nav-icon">♙</span><span>账号管理</span></a>
       {% endif %}

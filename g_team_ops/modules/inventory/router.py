@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -12,14 +13,17 @@ from ...listing import (
     MAX_LISTING_FILE_SIZE,
     ListingAirScriptClient,
     infer_listing_data_date,
+    listing_summary_from_payload,
     parse_listing_export,
     validate_listing_data_date,
 )
 from ...web.context import WebContext, check_csrf, json_error
+from ..operations.shared_table import SharedTableOperationManager
 
 
 def build_router(ctx: WebContext) -> APIRouter:
     router = APIRouter()
+    operation_manager = SharedTableOperationManager(ctx.operations)
 
     @router.get("/inventory", response_class=HTMLResponse)
     async def inventory_page(request: Request):
@@ -219,14 +223,38 @@ def build_router(ctx: WebContext) -> APIRouter:
                 pending.shop_id,
                 pending.country_id,
             )
-            summary = await asyncio.to_thread(
-                ListingAirScriptClient(
-                    config,
-                    retries=ctx.coordinator.settings.retries,
-                ).sync,
-                pending.parsed.rows,
-                pending.data_date,
+            client = ListingAirScriptClient(
+                config,
+                retries=ctx.coordinator.settings.retries,
             )
+            guarded = await asyncio.to_thread(
+                operation_manager.execute,
+                profile_id=account.id,
+                module_name="inventory",
+                operation_type="listing_import",
+                shop_id=pending.shop_id,
+                country_id=pending.country_id,
+                idempotency_key=str(
+                    request.headers.get("Idempotency-Key")
+                    or f"listing-preview:{preview_id}"
+                ),
+                snapshot_before=lambda: client.snapshot_rows(pending.parsed.rows),
+                apply=lambda before: client.sync(
+                    pending.parsed.rows,
+                    pending.data_date,
+                    preconditions=before,
+                ),
+                snapshot_after=client.snapshot_targets,
+                serialize_result=asdict,
+                restore_result=listing_summary_from_payload,
+                is_partial=lambda result: bool(result.failures),
+                initial_summary={
+                    "filename": pending.filename,
+                    "data_date": pending.data_date,
+                    "row_count": len(pending.parsed.rows),
+                },
+            )
+            summary = guarded.business_result
         except (CarrierError, ConfigurationError) as exc:
             return json_error(exc.user_message)
         except Exception:
@@ -256,6 +284,7 @@ def build_router(ctx: WebContext) -> APIRouter:
                 "conflicts": summary.conflicts,
                 "failures": summary.failures,
             },
+            "operation": guarded.batch.to_payload(),
         }
 
     return router

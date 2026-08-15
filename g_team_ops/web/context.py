@@ -22,6 +22,8 @@ from ..listing import (
     ListingConnectionConfig,
     ListingPreviewRegistry,
 )
+from ..db.backup import DatabaseBackupService
+from ..modules.operations.repository import OperationRepository
 from ..storage import ProjectDatabase
 from .services import CaptchaRegistry, QueryCoordinator
 
@@ -62,6 +64,8 @@ class WebContext:
     listing_previews: ListingPreviewRegistry
     templates: Jinja2Templates
     logger: Any
+    operations: OperationRepository
+    backups: DatabaseBackupService
 
     async def json_payload(self, request: Request) -> dict[str, Any]:
         try:

@@ -121,7 +121,7 @@ function targetRows(headers) {
     return [headers, row];
 }
 
-function execute(sheet, item) {
+function executeWith(sheet, argv) {
     const Application = {
         Sheets: {
             Count: 1,
@@ -129,13 +129,15 @@ function execute(sheet, item) {
         }
     };
     const runner = new Function("Application", "Context", source);
-    return runner(Application, {
-        argv: {
-            action: "sync",
-            sheet_name: "纯粹-美国",
-            data_date: "2026-08-06",
-            items: [item]
-        }
+    return runner(Application, { argv });
+}
+
+function execute(sheet, item) {
+    return executeWith(sheet, {
+        action: "sync",
+        sheet_name: "纯粹-美国",
+        data_date: "2026-08-06",
+        items: [item]
     });
 }
 
@@ -166,13 +168,81 @@ const missingTarget = execute(requiredOnlySheet, {
     discount_price: 12.99
 });
 
+const recoverySheet = new FakeSheet("纯粹-美国", targetRows(optionalHeaders));
+const recoveryItem = {
+    msku: "SKU-1",
+    asin: "B012345678",
+    discount_price: 15.99
+};
+const recoveryBefore = executeWith(recoverySheet, {
+    action: "snapshot",
+    sheet_name: "纯粹-美国",
+    items: [recoveryItem]
+});
+const recoverySync = executeWith(recoverySheet, {
+    action: "sync",
+    sheet_name: "纯粹-美国",
+    data_date: "2026-08-06",
+    items: [recoveryItem],
+    preconditions: recoveryBefore.snapshots
+});
+const recoveryAfter = executeWith(recoverySheet, {
+    action: "snapshot_targets",
+    sheet_name: "纯粹-美国",
+    items: [],
+    targets: recoveryBefore.snapshots
+});
+const recoveryChanges = recoveryBefore.snapshots.map((oldItem, index) => ({
+    targetType: oldItem.targetType,
+    sheetName: oldItem.sheetName,
+    matchHeader: oldItem.matchHeader,
+    matchValue: oldItem.matchValue,
+    itemKey: oldItem.itemKey,
+    field: oldItem.field,
+    cellAddress: oldItem.cellAddress,
+    oldValue: oldItem.value,
+    newValue: recoveryAfter.snapshots[index].value
+})).filter((item, index) =>
+    JSON.stringify(recoveryBefore.snapshots[index].comparableValue) !==
+    JSON.stringify(recoveryAfter.snapshots[index].comparableValue)
+);
+const recoveryPreview = executeWith(recoverySheet, {
+    action: "inspect_changes",
+    sheet_name: "纯粹-美国",
+    items: [],
+    changes: recoveryChanges,
+    direction: "rollback"
+});
+const recoveryApplied = executeWith(recoverySheet, {
+    action: "apply_changes",
+    sheet_name: "纯粹-美国",
+    items: [],
+    changes: recoveryChanges,
+    direction: "rollback"
+});
+const discountAfterRecovery = recoverySheet.value("优惠价", optionalHeaders);
+recoverySheet._cell(2, optionalHeaders.indexOf("优惠价") + 1).value = 17.88;
+const recoveryConflict = executeWith(recoverySheet, {
+    action: "inspect_changes",
+    sheet_name: "纯粹-美国",
+    items: [],
+    changes: recoveryChanges,
+    direction: "rollback"
+});
+
 console.log(JSON.stringify({
     priced,
     blanked,
     missingTarget,
     priceAfterWrite,
     priceAfterBlank,
-    regularPrice: requiredOnlySheet.value("价格", requiredHeaders)
+    regularPrice: requiredOnlySheet.value("价格", requiredHeaders),
+    recoverySync,
+    recoveryChangeCount: recoveryChanges.length,
+    recoveryPreview,
+    recoveryApplied,
+    discountAfterRecovery,
+    recoveryConflict
 }));
 """
     completed = subprocess.run(
@@ -190,10 +260,16 @@ console.log(JSON.stringify({
     )
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
 
-    assert payload["priced"]["schemaVersion"] == 3
+    assert payload["priced"]["schemaVersion"] == 4
     assert payload["priceAfterWrite"] == 15.99
     assert payload["priceAfterBlank"] == ""
     assert payload["priced"]["columns"]["discount_price"] == "D"
     assert "discount_price" not in payload["missingTarget"]["columns"]
     assert payload["regularPrice"] == 19.99
     assert payload["blanked"]["failures"] == []
+    assert payload["recoverySync"]["updated"] == ["SKU-1"]
+    assert payload["recoveryChangeCount"] >= 2
+    assert len(payload["recoveryPreview"]["ready"]) == payload["recoveryChangeCount"]
+    assert len(payload["recoveryApplied"]["applied"]) == payload["recoveryChangeCount"]
+    assert payload["discountAfterRecovery"] == 18.99
+    assert len(payload["recoveryConflict"]["conflicts"]) == 1

@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .airscript import AirScriptConfig
+from .db.migration import upgrade_database
+from .db.runtime import connect_sqlite
 from .errors import ConfigurationError
 from .sites import infer_country_code, normalize_country_code
 
@@ -143,171 +145,10 @@ class ProjectDatabase:
             return backup_path
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10)
-        connection.execute("PRAGMA journal_mode=WAL")
-        return connection
+        return connect_sqlite(self.path)
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS carrier_credentials (
-                    profile_id TEXT NOT NULL,
-                    carrier TEXT NOT NULL,
-                    username TEXT NOT NULL,
-                    password_ciphertext TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (profile_id, carrier)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS system_settings (
-                    setting_key TEXT PRIMARY KEY,
-                    setting_value TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS carrier_sessions (
-                    profile_id TEXT NOT NULL,
-                    carrier TEXT NOT NULL,
-                    token_ciphertext TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (profile_id, carrier)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tracking_detail_cache (
-                    profile_id TEXT NOT NULL,
-                    carrier TEXT NOT NULL,
-                    fba TEXT NOT NULL,
-                    schema_version INTEGER NOT NULL,
-                    latest_time TEXT NOT NULL,
-                    latest_event TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (profile_id, carrier, fba)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS shops (
-                    id TEXT PRIMARY KEY,
-                    profile_id TEXT NOT NULL,
-                    name TEXT NOT NULL COLLATE NOCASE,
-                    share_url TEXT NOT NULL,
-                    webhook_url TEXT NOT NULL,
-                    api_token_ciphertext TEXT NOT NULL,
-                    sheet_name TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(profile_id, name)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS listing_connections (
-                    profile_id TEXT NOT NULL,
-                    shop_id TEXT NOT NULL,
-                    webhook_url TEXT NOT NULL,
-                    api_token_ciphertext TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (profile_id, shop_id)
-                )
-                """
-            )
-            shop_columns = {
-                str(row[1])
-                for row in connection.execute("PRAGMA table_info(shops)").fetchall()
-            }
-            if "listing_prefix" not in shop_columns:
-                connection.execute(
-                    "ALTER TABLE shops ADD COLUMN listing_prefix "
-                    "TEXT NOT NULL DEFAULT ''"
-                )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS shop_countries (
-                    id TEXT PRIMARY KEY,
-                    profile_id TEXT NOT NULL,
-                    shop_id TEXT NOT NULL,
-                    country_name TEXT NOT NULL COLLATE NOCASE,
-                    sheet_name TEXT NOT NULL COLLATE NOCASE,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(profile_id, shop_id, country_name),
-                    UNIQUE(profile_id, shop_id, sheet_name)
-                )
-                """
-            )
-            country_columns = {
-                str(row[1])
-                for row in connection.execute(
-                    "PRAGMA table_info(shop_countries)"
-                ).fetchall()
-            }
-            for column_name in (
-                "country_code",
-                "fba_sheet_name",
-                "detail_sheet_name",
-            ):
-                if column_name not in country_columns:
-                    connection.execute(
-                        f"ALTER TABLE shop_countries ADD COLUMN {column_name} "
-                        "TEXT NOT NULL DEFAULT ''"
-                    )
-            connection.execute(
-                "INSERT OR IGNORE INTO system_settings(setting_key, setting_value) VALUES('max_query_count', ?)",
-                (str(SYSTEM_MAX_QUERY_COUNT),),
-            )
-            # 旧网页版每个用户只有一份AirScript配置。首次升级时保留原记录，
-            # 同时迁移为该用户的“默认店铺”，桌面验证版仍可继续读取旧表。
-            legacy_table_exists = connection.execute(
-                """
-                SELECT 1 FROM sqlite_master
-                WHERE type='table' AND name='airscript_settings'
-                """
-            ).fetchone()
-            legacy_rows = (
-                connection.execute(
-                    """
-                    SELECT profile_id, share_url, webhook_url, api_token_ciphertext,
-                           sheet_name, updated_at
-                    FROM airscript_settings AS legacy
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM shops WHERE shops.profile_id=legacy.profile_id
-                    )
-                    """
-                ).fetchall()
-                if legacy_table_exists
-                else []
-            )
-            for row in legacy_rows:
-                connection.execute(
-                    """
-                    INSERT INTO shops(
-                        id, profile_id, name, share_url, webhook_url,
-                        api_token_ciphertext, sheet_name, created_at, updated_at
-                    ) VALUES (?, ?, '默认店铺', ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        secrets.token_hex(16),
-                        row[0],
-                        row[1],
-                        row[2],
-                        row[3],
-                        row[4],
-                        row[5],
-                        row[5],
-                    ),
-                )
+        upgrade_database(self.path)
 
     def save_credentials(self, carrier: str, username: str, password: str) -> None:
         username = username.strip()

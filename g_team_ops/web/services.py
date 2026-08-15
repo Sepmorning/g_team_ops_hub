@@ -207,6 +207,8 @@ class QueryCoordinator:
         user_id: str,
         fbas: list[str],
         airscript_config: AirScriptConfig | None = None,
+        *,
+        sync_wps: bool = True,
     ) -> WebQueryResponse:
         # 防止同一用户重复点击后并发挤掉自己的货代会话。
         with self._user_lock(user_id):
@@ -268,7 +270,7 @@ class QueryCoordinator:
                     {},
                 )
             response = WebQueryResponse(results=results)
-            if airscript_config is not None:
+            if airscript_config is not None and sync_wps:
                 self._sync_wps(airscript_config, response)
             counts: dict[str, int] = {}
             for result in results:
@@ -287,6 +289,8 @@ class QueryCoordinator:
         user_id: str,
         items: list[PendingTrackingItem],
         airscript_config: AirScriptConfig | None = None,
+        *,
+        sync_wps: bool = True,
     ) -> WebQueryResponse:
         """优先查询共享表指定货代，仅对“未找到”的FBA查询其他货代。"""
         with self._user_lock(user_id):
@@ -555,7 +559,7 @@ class QueryCoordinator:
                 primary_carriers,
             )
             response = WebQueryResponse(results=results)
-            if airscript_config is not None:
+            if airscript_config is not None and sync_wps:
                 self._sync_wps(airscript_config, response)
             counts: dict[str, int] = {}
             for result in results:

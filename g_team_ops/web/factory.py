@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from ..auth import UserRepository
+from ..db.backup import DatabaseBackupService
 from ..listing import ListingPreviewRegistry
 from ..logging_config import configure_logging
 from ..modules.accounts import build_router as build_accounts_router
@@ -22,6 +23,8 @@ from ..modules.carrier_connections import (
     build_router as build_carrier_connections_router,
 )
 from ..modules.inventory import build_router as build_inventory_router
+from ..modules.operations.repository import OperationRepository
+from ..modules.operations.router import build_router as build_operations_router
 from ..modules.shops import build_router as build_shops_router
 from ..modules.tracking import build_router as build_tracking_router
 from ..storage import protect_secret, unprotect_secret
@@ -54,6 +57,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         data_dir or (Path(__file__).resolve().parents[2] / "data")
     )
     data_dir.mkdir(parents=True, exist_ok=True)
+    if (data_dir / ".database-maintenance.lock").exists():
+        raise RuntimeError(
+            "数据库维护锁存在。请确认维护程序已经结束；若维护程序异常退出，"
+            "核对data目录后再人工删除.database-maintenance.lock"
+        )
     logger = configure_logging(data_dir)
     database_path = data_dir / "app.db"
     settings_path = data_dir / "settings.json"
@@ -61,7 +69,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     coordinator = QueryCoordinator(database_path, settings_path)
     captcha_registry = CaptchaRegistry()
     listing_preview_registry = ListingPreviewRegistry()
-
+    operations = OperationRepository(database_path)
+    backups = DatabaseBackupService(database_path, data_dir / "backups", operations)
+    try:
+        automatic_backup, removed_backups = backups.ensure_daily_backup()
+        logger.info(
+            "database_daily_backup_ready file=%s removed=%s",
+            automatic_backup.file_name,
+            len(removed_backups),
+        )
+    except Exception:
+        logger.exception("database_daily_backup_failed")
     app = FastAPI(
         title="G组运营工作台",
         docs_url=None,
@@ -94,6 +112,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         listing_previews=listing_preview_registry,
         templates=templates,
         logger=logger,
+        operations=operations,
+        backups=backups,
     )
 
     # 保留既有app.state名称，兼容测试、诊断和后续管理工具。
@@ -104,6 +124,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     app.state.captchas = captcha_registry
     app.state.listing_previews = listing_preview_registry
     app.state.logger = logger
+    app.state.operations = operations
+    app.state.backups = backups
     app.state.web_context = context
 
     for router in (
@@ -112,6 +134,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         build_shops_router(context),
         build_tracking_router(context),
         build_inventory_router(context),
+        build_operations_router(context),
     ):
         app.include_router(router)
 

@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 const DEFAULT_SHEET_NAME = "US-FBA";
 const DEFAULT_DETAIL_SHEET_NAME = "US-轨迹明细";
 const HEADER_END_COLUMN = "CV";
@@ -971,6 +971,506 @@ function syncEvents(detailSheet, detailColumns, acceptedItems) {
     };
 }
 
+function scalarValue(range) {
+    const values = firstRowValues(range.Value2);
+    return values.length > 0 ? values[0] : "";
+}
+
+function comparableDetailRow(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    const result = {};
+    const fields = Object.keys(DETAIL_FIELD_DEFINITIONS);
+    for (let index = 0; index < fields.length; index++) {
+        const field = fields[index];
+        result[field] = comparableDetailValue(field, value[field]);
+    }
+    return result;
+}
+
+function buildDetailRowsByEventId(sheet, columns, detailLastRow) {
+    const result = Object.create(null);
+    if (detailLastRow < 2) {
+        return result;
+    }
+    const values = singleColumnValues(
+        sheet.Range(
+            columns.event_id.columnLetter + "2:" +
+            columns.event_id.columnLetter + detailLastRow
+        ).Value2
+    );
+    for (let index = 0; index < values.length; index++) {
+        const eventId = displayText(values[index]);
+        if (eventId === "") {
+            continue;
+        }
+        if (result[eventId]) {
+            throw new Error(
+                "事件编号 " + eventId + " 在明细表中重复，已停止处理"
+            );
+        }
+        result[eventId] = index + 2;
+    }
+    return result;
+}
+
+function detailRowValue(sheet, columns, row) {
+    const result = {};
+    const fields = Object.keys(DETAIL_FIELD_DEFINITIONS);
+    for (let index = 0; index < fields.length; index++) {
+        const field = fields[index];
+        result[field] = scalarValue(
+            sheet.Range(columns[field].columnLetter + row)
+        );
+    }
+    return result;
+}
+
+function trackingCellSnapshot(sheet, columns, fba, row, field) {
+    const column = columns[field];
+    const address = column.columnLetter + row;
+    const value = scalarValue(sheet.Range(address));
+    return {
+        targetType: "cell",
+        sheetName: displayText(sheet.Name),
+        matchHeader: columns.fba.text,
+        matchValue: fba,
+        itemKey: fba,
+        field: field,
+        header: column.text,
+        cellAddress: address,
+        value: value,
+        comparableValue: comparableMainValue(field, value)
+    };
+}
+
+function trackingRowSnapshot(
+    detailSheet,
+    detailColumns,
+    eventId,
+    row,
+    itemKey,
+    reason
+) {
+    const value = row ? detailRowValue(detailSheet, detailColumns, row) : null;
+    return {
+        targetType: "row",
+        sheetName: displayText(detailSheet.Name),
+        matchHeader: detailColumns.event_id.text,
+        matchValue: eventId,
+        itemKey: itemKey,
+        reason: reason || "event",
+        field: "__row__",
+        header: "轨迹事件行",
+        cellAddress: row ? detailColumns.event_id.columnLetter + row : "",
+        value: value,
+        comparableValue: comparableDetailRow(value)
+    };
+}
+
+function collectTrackingSnapshots(
+    mainSheet,
+    mainColumns,
+    detailSheet,
+    detailColumns,
+    snapshotItems,
+    includeCleanup
+) {
+    const mainLastRow = lastUsedRow(mainSheet, mainSheet.Name);
+    const rowsByFba = buildRowsByFba(mainSheet, mainColumns, mainLastRow);
+    const detailLastRow = lastUsedRow(detailSheet, detailSheet.Name);
+    const detailRows = buildDetailRowsByEventId(
+        detailSheet, detailColumns, detailLastRow
+    );
+    const eventTargets = Object.create(null);
+    const snapshots = [];
+    const seenFbas = Object.create(null);
+
+    for (let itemIndex = 0; itemIndex < snapshotItems.length; itemIndex++) {
+        const item = snapshotItems[itemIndex] &&
+            typeof snapshotItems[itemIndex] === "object"
+            ? snapshotItems[itemIndex] : {};
+        const fba = normalizeFba(item.fba);
+        if (isValidFba(fba) && !seenFbas[fba]) {
+            seenFbas[fba] = true;
+            const rows = rowsByFba[fba] || [];
+            if (rows.length === 1) {
+                for (
+                    let fieldIndex = 0;
+                    fieldIndex < MAIN_VALUE_FIELDS.length;
+                    fieldIndex++
+                ) {
+                    snapshots.push(
+                        trackingCellSnapshot(
+                            mainSheet,
+                            mainColumns,
+                            fba,
+                            rows[0],
+                            MAIN_VALUE_FIELDS[fieldIndex]
+                        )
+                    );
+                }
+            }
+        }
+        const events = Array.isArray(item.events) ? item.events : [];
+        for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
+            const eventId = displayText(events[eventIndex] && events[eventIndex].event_id);
+            if (eventId !== "" && !eventTargets[eventId]) {
+                eventTargets[eventId] = {
+                    itemKey: fba,
+                    reason: "event"
+                };
+            }
+        }
+    }
+
+    if (includeCleanup && detailLastRow >= 2) {
+        const activeFbas = activeFbasFromMain(
+            mainSheet, mainColumns, mainLastRow
+        );
+        const eventIds = singleColumnValues(
+            detailSheet.Range(
+                detailColumns.event_id.columnLetter + "2:" +
+                detailColumns.event_id.columnLetter + detailLastRow
+            ).Value2
+        );
+        const detailFbas = singleColumnValues(
+            detailSheet.Range(
+                detailColumns.fba.columnLetter + "2:" +
+                detailColumns.fba.columnLetter + detailLastRow
+            ).Value2
+        );
+        for (let index = 0; index < eventIds.length; index++) {
+            const eventId = displayText(eventIds[index]);
+            const fba = normalizeFba(detailFbas[index]);
+            if (
+                eventId !== "" &&
+                isValidFba(fba) &&
+                !activeFbas[fba] &&
+                !eventTargets[eventId]
+            ) {
+                eventTargets[eventId] = {
+                    itemKey: fba,
+                    reason: "cleanup"
+                };
+            }
+        }
+    }
+
+    const eventIds = Object.keys(eventTargets);
+    for (let index = 0; index < eventIds.length; index++) {
+        const eventId = eventIds[index];
+        const target = eventTargets[eventId];
+        snapshots.push(
+            trackingRowSnapshot(
+                detailSheet,
+                detailColumns,
+                eventId,
+                detailRows[eventId] || 0,
+                target.itemKey,
+                target.reason
+            )
+        );
+    }
+    return snapshots;
+}
+
+function currentTrackingSnapshot(
+    mainSheet,
+    mainColumns,
+    detailSheet,
+    detailColumns,
+    target,
+    cachedMainRows,
+    cachedDetailRows
+) {
+    const targetType = displayText(target && target.targetType).toLowerCase();
+    if (targetType === "cell") {
+        if (
+            normalizeText(target.sheetName) !== normalizeText(mainSheet.Name)
+        ) {
+            throw new Error("恢复单元格不属于当前FBA主表");
+        }
+        const field = displayText(target.field);
+        if (MAIN_VALUE_FIELDS.indexOf(field) < 0 || !mainColumns[field]) {
+            throw new Error("恢复目标不是物流系统可写字段：" + field);
+        }
+        const fba = normalizeFba(target.matchValue);
+        const mainRows = cachedMainRows || buildRowsByFba(
+            mainSheet,
+            mainColumns,
+            lastUsedRow(mainSheet, mainSheet.Name)
+        );
+        const rows = mainRows[fba] || [];
+        if (rows.length !== 1) {
+            throw new Error("FBA在主表中不是唯一一行：" + displayText(target.matchValue));
+        }
+        return trackingCellSnapshot(
+            mainSheet, mainColumns, fba, rows[0], field
+        );
+    }
+    if (targetType === "row") {
+        if (
+            normalizeText(target.sheetName) !== normalizeText(detailSheet.Name) ||
+            displayText(target.field) !== "__row__"
+        ) {
+            throw new Error("恢复行不属于当前轨迹明细表");
+        }
+        const eventId = displayText(target.matchValue);
+        if (eventId === "") {
+            throw new Error("恢复目标缺少事件编号");
+        }
+        const detailRows = cachedDetailRows || buildDetailRowsByEventId(
+            detailSheet,
+            detailColumns,
+            lastUsedRow(detailSheet, detailSheet.Name)
+        );
+        return trackingRowSnapshot(
+            detailSheet,
+            detailColumns,
+            eventId,
+            detailRows[eventId] || 0,
+            displayText(target.itemKey),
+            displayText(target.reason)
+        );
+    }
+    throw new Error("不支持的恢复目标类型");
+}
+
+function sameComparable(left, right) {
+    return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function expectedComparable(target, value) {
+    return displayText(target.targetType).toLowerCase() === "row"
+        ? comparableDetailRow(value)
+        : comparableMainValue(displayText(target.field), value);
+}
+
+function verifyTrackingPreconditions(
+    mainSheet,
+    mainColumns,
+    detailSheet,
+    detailColumns,
+    preconditions
+) {
+    const mainRows = buildRowsByFba(
+        mainSheet,
+        mainColumns,
+        lastUsedRow(mainSheet, mainSheet.Name)
+    );
+    const detailRows = buildDetailRowsByEventId(
+        detailSheet,
+        detailColumns,
+        lastUsedRow(detailSheet, detailSheet.Name)
+    );
+    for (let index = 0; index < preconditions.length; index++) {
+        const expected = preconditions[index];
+        const current = currentTrackingSnapshot(
+            mainSheet,
+            mainColumns,
+            detailSheet,
+            detailColumns,
+            expected,
+            mainRows,
+            detailRows
+        );
+        const comparable = Object.prototype.hasOwnProperty.call(
+            expected, "comparableValue"
+        ) ? expected.comparableValue : expectedComparable(
+            expected, expected.value
+        );
+        if (!sameComparable(current.comparableValue, comparable)) {
+            throw new Error(
+                "共享表在写前快照后发生变化：" +
+                displayText(expected.itemKey || expected.matchValue) +
+                " / " + displayText(expected.header || expected.field) +
+                "。本次已停止，未覆盖新值"
+            );
+        }
+    }
+}
+
+function inspectTrackingChanges(
+    mainSheet,
+    mainColumns,
+    detailSheet,
+    detailColumns,
+    changes,
+    direction,
+    indexOffset
+) {
+    const result = {
+        ready: [],
+        alreadyApplied: [],
+        conflicts: [],
+        failures: []
+    };
+    const mainRows = buildRowsByFba(
+        mainSheet,
+        mainColumns,
+        lastUsedRow(mainSheet, mainSheet.Name)
+    );
+    const detailRows = buildDetailRowsByEventId(
+        detailSheet,
+        detailColumns,
+        lastUsedRow(detailSheet, detailSheet.Name)
+    );
+    for (let index = 0; index < changes.length; index++) {
+        const change = changes[index] && typeof changes[index] === "object"
+            ? changes[index] : {};
+        const globalIndex = indexOffset + index;
+        try {
+            const current = currentTrackingSnapshot(
+                mainSheet,
+                mainColumns,
+                detailSheet,
+                detailColumns,
+                change,
+                mainRows,
+                detailRows
+            );
+            const expectedValue = direction === "rollback"
+                ? change.newValue : change.oldValue;
+            const desiredValue = direction === "rollback"
+                ? change.oldValue : change.newValue;
+            const item = {
+                index: globalIndex,
+                itemKey: displayText(change.itemKey || change.matchValue),
+                targetType: displayText(change.targetType),
+                matchValue: displayText(change.matchValue),
+                field: displayText(change.field),
+                header: displayText(change.header || current.header),
+                cellAddress: current.cellAddress,
+                currentValue: current.value,
+                expectedValue: expectedValue,
+                desiredValue: desiredValue
+            };
+            const expected = expectedComparable(change, expectedValue);
+            const desired = expectedComparable(change, desiredValue);
+            if (sameComparable(current.comparableValue, expected)) {
+                result.ready.push(item);
+            } else if (sameComparable(current.comparableValue, desired)) {
+                result.alreadyApplied.push(item);
+            } else {
+                result.conflicts.push(item);
+            }
+        } catch (error) {
+            result.failures.push({
+                index: globalIndex,
+                itemKey: displayText(change.itemKey || change.matchValue),
+                matchValue: displayText(change.matchValue),
+                field: displayText(change.field),
+                message: displayText(error && error.message ? error.message : error)
+            });
+        }
+    }
+    return result;
+}
+
+function applyTrackingChange(
+    mainSheet,
+    mainColumns,
+    detailSheet,
+    detailColumns,
+    change,
+    desiredValue
+) {
+    if (displayText(change.targetType).toLowerCase() === "cell") {
+        const current = currentTrackingSnapshot(
+            mainSheet,
+            mainColumns,
+            detailSheet,
+            detailColumns,
+            change
+        );
+        const range = mainSheet.Range(current.cellAddress);
+        const field = displayText(change.field);
+        if (DATE_ONLY_FIELDS[field]) {
+            range.NumberFormat = "yyyy-mm-dd";
+        } else if (DATE_TIME_FIELDS[field]) {
+            range.NumberFormat = "yyyy-mm-dd hh:mm:ss";
+        }
+        range.Value2 = desiredValue;
+        return;
+    }
+    const eventId = displayText(change.matchValue);
+    const detailLastRow = lastUsedRow(detailSheet, detailSheet.Name);
+    const detailRows = buildDetailRowsByEventId(
+        detailSheet, detailColumns, detailLastRow
+    );
+    const existingRow = detailRows[eventId] || 0;
+    if (desiredValue === null || desiredValue === undefined) {
+        if (existingRow) {
+            detailSheet.Range(
+                detailColumns.event_id.columnLetter + existingRow
+            ).EntireRow.Delete();
+        }
+        return;
+    }
+    const row = existingRow || Math.max(2, detailLastRow + 1);
+    applyDetailFormats(detailSheet, detailColumns, row, row);
+    const fields = Object.keys(DETAIL_FIELD_DEFINITIONS);
+    for (let index = 0; index < fields.length; index++) {
+        const field = fields[index];
+        const value = Object.prototype.hasOwnProperty.call(desiredValue, field)
+            ? desiredValue[field] : "";
+        detailSheet.Range(detailColumns[field].columnLetter + row).Value2 = value;
+    }
+}
+
+function applyTrackingChanges(
+    mainSheet,
+    mainColumns,
+    detailSheet,
+    detailColumns,
+    changes,
+    direction,
+    indexOffset
+) {
+    const inspected = inspectTrackingChanges(
+        mainSheet,
+        mainColumns,
+        detailSheet,
+        detailColumns,
+        changes,
+        direction,
+        indexOffset
+    );
+    const result = {
+        applied: [],
+        alreadyApplied: inspected.alreadyApplied,
+        conflicts: inspected.conflicts,
+        failures: inspected.failures
+    };
+    for (let readyIndex = 0; readyIndex < inspected.ready.length; readyIndex++) {
+        const ready = inspected.ready[readyIndex];
+        const localIndex = ready.index - indexOffset;
+        const change = changes[localIndex];
+        try {
+            applyTrackingChange(
+                mainSheet,
+                mainColumns,
+                detailSheet,
+                detailColumns,
+                change,
+                ready.desiredValue
+            );
+            result.applied.push(ready);
+        } catch (error) {
+            result.failures.push({
+                index: ready.index,
+                itemKey: ready.itemKey,
+                matchValue: ready.matchValue,
+                field: ready.field,
+                message: displayText(error && error.message ? error.message : error)
+            });
+        }
+    }
+    return result;
+}
+
 const argv = Context && Context.argv ? Context.argv : {};
 const action = normalizeText(argv.action || "validate").toLowerCase();
 const sheetName = normalizeText(argv.sheet_name || DEFAULT_SHEET_NAME);
@@ -984,7 +1484,11 @@ if (
     action !== "validate" &&
     action !== "sync" &&
     action !== "sync_tracking" &&
-    action !== "list_pending"
+    action !== "list_pending" &&
+    action !== "snapshot" &&
+    action !== "snapshot_targets" &&
+    action !== "inspect_changes" &&
+    action !== "apply_changes"
 ) {
     throw new Error("不支持的操作：" + action);
 }
@@ -1029,6 +1533,83 @@ const baseResult = {
 if (action === "validate") {
     console.log(JSON.stringify(baseResult));
     return baseResult;
+}
+
+if (action === "snapshot") {
+    if (items.length > MAX_ITEMS) {
+        throw new Error("单次最多快照 " + MAX_ITEMS + " 个FBA");
+    }
+    const snapshotResult = Object.assign(baseResult, {
+        snapshots: collectTrackingSnapshots(
+            targetSheet,
+            columns,
+            detailSheet,
+            detailColumns,
+            items,
+            argv.include_cleanup === true
+        )
+    });
+    console.log(JSON.stringify(snapshotResult));
+    return snapshotResult;
+}
+
+if (action === "snapshot_targets") {
+    const targets = Array.isArray(argv.targets) ? argv.targets : [];
+    const mainRows = buildRowsByFba(
+        targetSheet,
+        columns,
+        lastUsedRow(targetSheet, targetSheet.Name)
+    );
+    const detailRows = buildDetailRowsByEventId(
+        detailSheet,
+        detailColumns,
+        lastUsedRow(detailSheet, detailSheet.Name)
+    );
+    const snapshots = targets.map(function (target) {
+        return currentTrackingSnapshot(
+            targetSheet,
+            columns,
+            detailSheet,
+            detailColumns,
+            target,
+            mainRows,
+            detailRows
+        );
+    });
+    const targetResult = Object.assign(baseResult, { snapshots: snapshots });
+    console.log(JSON.stringify(targetResult));
+    return targetResult;
+}
+
+if (action === "inspect_changes" || action === "apply_changes") {
+    const changes = Array.isArray(argv.changes) ? argv.changes : [];
+    const direction = displayText(argv.direction).toLowerCase();
+    if (direction !== "rollback" && direction !== "forward") {
+        throw new Error("变更方向无效");
+    }
+    const indexOffset = Math.max(0, Number(argv.index_offset) || 0);
+    const changeResult = action === "inspect_changes"
+        ? inspectTrackingChanges(
+            targetSheet,
+            columns,
+            detailSheet,
+            detailColumns,
+            changes,
+            direction,
+            indexOffset
+        )
+        : applyTrackingChanges(
+            targetSheet,
+            columns,
+            detailSheet,
+            detailColumns,
+            changes,
+            direction,
+            indexOffset
+        );
+    const response = Object.assign(baseResult, changeResult);
+    console.log(JSON.stringify(response));
+    return response;
 }
 
 const lastRow = lastUsedRow(targetSheet, sheetName);
@@ -1100,6 +1681,14 @@ if (action === "list_pending") {
 if (items.length > MAX_ITEMS) {
     throw new Error("单次最多处理 " + MAX_ITEMS + " 个FBA");
 }
+
+verifyTrackingPreconditions(
+    targetSheet,
+    columns,
+    detailSheet,
+    detailColumns,
+    Array.isArray(argv.preconditions) ? argv.preconditions : []
+);
 
 const updated = [];
 const auditOnly = [];

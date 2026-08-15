@@ -55,7 +55,7 @@ def config(token="placeholder-airscript-token"):
 def finished(result):
     if isinstance(result, dict) and result.get("success") is True:
         result = {
-            "schemaVersion": 10,
+            "schemaVersion": 11,
             "detailSheetName": "US-轨迹明细",
             **result,
         }
@@ -127,7 +127,7 @@ def test_dynamic_country_sheet_names_and_workbook_discovery_are_forwarded():
                 body=finished(
                     {
                         "success": True,
-                        "schemaVersion": 10,
+                        "schemaVersion": 11,
                         "sheets": [
                             {"id": "listing", "name": "纯粹-加拿大"},
                             {"id": "main", "name": "CA-FBA"},
@@ -156,7 +156,7 @@ def test_validate_accepts_json_string_result():
     result = json.dumps(
         {
             "success": True,
-            "schemaVersion": 10,
+            "schemaVersion": 11,
             "detailSheetName": "US-轨迹明细",
             "sheetName": "US-FBA",
             "columns": {

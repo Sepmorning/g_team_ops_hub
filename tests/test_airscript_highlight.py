@@ -118,6 +118,10 @@ class FakeSheet {
                 } else {
                     flattened.forEach(cell => { cell.value = value; });
                 }
+                sheet.UsedRange.Rows.Count = Math.max(
+                    sheet.UsedRange.Rows.Count,
+                    end.row
+                );
             }
         });
         Object.defineProperty(range, "NumberFormat", {
@@ -339,6 +343,143 @@ const detailDatesAfterChanged = {
     lastConfirmed: compareDetailSheet.cell("P2").value,
     updatedAt: compareDetailSheet.cell("Q2").value
 };
+
+const recoveryMainSheet = new FakeSheet("US-FBA", [mainHeaders, mainRow.slice()]);
+const recoveryDetailSheet = new FakeSheet("US-轨迹明细", [detailHeaders]);
+const recoverySheets = [recoveryMainSheet, recoveryDetailSheet];
+const recoveryApplication = {
+    Sheets: {
+        Count: recoverySheets.length,
+        Item(index) { return recoverySheets[index - 1]; }
+    }
+};
+const recoveryItem = {
+    fba: "FBA12345",
+    main: { route: "2026-08-09 12:00 已签收" }
+};
+const recoveryBefore = executeWith(recoveryApplication, {
+    action: "snapshot",
+    sheet_name: "US-FBA",
+    detail_sheet_name: "US-轨迹明细",
+    items: [recoveryItem],
+    include_cleanup: false
+});
+const recoverySync = executeWith(recoveryApplication, {
+    action: "sync",
+    sheet_name: "US-FBA",
+    detail_sheet_name: "US-轨迹明细",
+    items: [recoveryItem],
+    preconditions: recoveryBefore.snapshots
+});
+const recoveryAfter = executeWith(recoveryApplication, {
+    action: "snapshot_targets",
+    sheet_name: "US-FBA",
+    detail_sheet_name: "US-轨迹明细",
+    items: [],
+    targets: recoveryBefore.snapshots
+});
+const recoveryChanges = recoveryBefore.snapshots.map((oldItem, index) => ({
+    targetType: oldItem.targetType,
+    sheetName: oldItem.sheetName,
+    matchHeader: oldItem.matchHeader,
+    matchValue: oldItem.matchValue,
+    itemKey: oldItem.itemKey,
+    field: oldItem.field,
+    cellAddress: oldItem.cellAddress,
+    oldValue: oldItem.value,
+    newValue: recoveryAfter.snapshots[index].value
+})).filter((item, index) =>
+    JSON.stringify(recoveryBefore.snapshots[index].comparableValue) !==
+    JSON.stringify(recoveryAfter.snapshots[index].comparableValue)
+);
+const recoveryPreview = executeWith(recoveryApplication, {
+    action: "inspect_changes",
+    sheet_name: "US-FBA",
+    detail_sheet_name: "US-轨迹明细",
+    items: [],
+    changes: recoveryChanges,
+    direction: "rollback"
+});
+const recoveryApplied = executeWith(recoveryApplication, {
+    action: "apply_changes",
+    sheet_name: "US-FBA",
+    detail_sheet_name: "US-轨迹明细",
+    items: [],
+    changes: recoveryChanges,
+    direction: "rollback"
+});
+const routeAfterRecovery = recoveryMainSheet.cell("G2").value;
+recoveryMainSheet.cell("G2").value = "人工后续修改";
+const recoveryConflict = executeWith(recoveryApplication, {
+    action: "inspect_changes",
+    sheet_name: "US-FBA",
+    detail_sheet_name: "US-轨迹明细",
+    items: [],
+    changes: recoveryChanges,
+    direction: "rollback"
+});
+
+const rowMainSheet = new FakeSheet("US-FBA", [mainHeaders, mainRow.slice()]);
+const rowDetailSheet = new FakeSheet("US-轨迹明细", [detailHeaders]);
+const rowSheets = [rowMainSheet, rowDetailSheet];
+const rowApplication = {
+    Sheets: {
+        Count: rowSheets.length,
+        Item(index) { return rowSheets[index - 1]; }
+    }
+};
+const rowEvent = Object.assign({}, detailEvent, {
+    event_id: "event-restore",
+    updated_at: "2026-08-09 12:00:00"
+});
+const rowItem = {
+    fba: "FBA12345",
+    main: { route: mainRow[6] },
+    events: [rowEvent]
+};
+const rowBefore = executeWith(rowApplication, {
+    action: "snapshot",
+    sheet_name: "US-FBA",
+    detail_sheet_name: "US-轨迹明细",
+    items: [rowItem],
+    include_cleanup: false
+});
+const rowSync = executeWith(rowApplication, {
+    action: "sync_tracking",
+    sheet_name: "US-FBA",
+    detail_sheet_name: "US-轨迹明细",
+    items: [rowItem],
+    preconditions: rowBefore.snapshots
+});
+const rowAfter = executeWith(rowApplication, {
+    action: "snapshot_targets",
+    sheet_name: "US-FBA",
+    detail_sheet_name: "US-轨迹明细",
+    items: [],
+    targets: rowBefore.snapshots
+});
+const rowChanges = rowBefore.snapshots.map((oldItem, index) => ({
+    targetType: oldItem.targetType,
+    sheetName: oldItem.sheetName,
+    matchHeader: oldItem.matchHeader,
+    matchValue: oldItem.matchValue,
+    itemKey: oldItem.itemKey,
+    field: oldItem.field,
+    cellAddress: oldItem.cellAddress,
+    oldValue: oldItem.value,
+    newValue: rowAfter.snapshots[index].value
+})).filter((item, index) =>
+    JSON.stringify(rowBefore.snapshots[index].comparableValue) !==
+    JSON.stringify(rowAfter.snapshots[index].comparableValue)
+);
+const rowRestore = executeWith(rowApplication, {
+    action: "apply_changes",
+    sheet_name: "US-FBA",
+    detail_sheet_name: "US-轨迹明细",
+    items: [],
+    changes: rowChanges,
+    direction: "rollback"
+});
 const detailFbasAfterCleanup = [
     compareDetailSheet.cell("B2").value,
     compareDetailSheet.cell("B3").value,
@@ -358,7 +499,17 @@ console.log(JSON.stringify({
     detailChanged,
     detailFbasAfterCleanup,
     detailDatesAfterSame,
-    detailDatesAfterChanged
+    detailDatesAfterChanged,
+    recoverySync,
+    recoveryChangeCount: recoveryChanges.length,
+    recoveryPreview,
+    recoveryApplied,
+    routeAfterRecovery,
+    recoveryConflict,
+    rowSync,
+    rowChangeCount: rowChanges.length,
+    rowRestore,
+    rowEventAfterRestore: rowDetailSheet.cell("A2").value
 }));
 """
     completed = subprocess.run(
@@ -370,7 +521,7 @@ console.log(JSON.stringify({
     )
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
 
-    assert payload["first"]["schemaVersion"] == 10
+    assert payload["first"]["schemaVersion"] == 11
     assert payload["first"]["updated"] == ["FBA12345"]
     assert payload["first"]["auditOnly"] == []
     assert payload["first"]["formatFailures"] == []
@@ -413,3 +564,13 @@ console.log(JSON.stringify({
         payload["detailDatesAfterChanged"]["lastConfirmed"], (int, float)
     )
     assert isinstance(payload["detailDatesAfterChanged"]["updatedAt"], (int, float))
+    assert payload["recoverySync"]["updated"] == ["FBA12345"]
+    assert payload["recoveryChangeCount"] == 1
+    assert len(payload["recoveryPreview"]["ready"]) == 1
+    assert len(payload["recoveryApplied"]["applied"]) == 1
+    assert payload["routeAfterRecovery"] == "2026-07-29 09:00 已到港"
+    assert len(payload["recoveryConflict"]["conflicts"]) == 1
+    assert payload["rowSync"]["eventsAdded"] == 1
+    assert payload["rowChangeCount"] == 1
+    assert len(payload["rowRestore"]["applied"]) == 1
+    assert payload["rowEventAfterRestore"] == ""

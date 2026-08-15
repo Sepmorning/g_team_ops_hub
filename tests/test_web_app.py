@@ -62,6 +62,7 @@ def test_web_setup_login_and_private_pages(tmp_path):
         assert "货代连接" in client.get("/carriers").text
         assert "我的店铺" in client.get("/shops").text
         assert "请先添加店铺" in client.get("/inventory").text
+        assert "操作历史与恢复" in client.get("/operations").text
         assert "账号管理" in client.get("/admin").text
 
 
@@ -71,11 +72,12 @@ def test_query_api_reuses_coordinator_and_returns_all_results(tmp_path):
         csrf = bootstrap_and_login(client)
         called = {}
 
-        def fake_query(user_id, fbas, airscript_config):
+        def fake_query(user_id, fbas, airscript_config, *, sync_wps=True):
             called.update(
                 user_id=user_id,
                 fbas=fbas,
                 airscript_config=airscript_config,
+                sync_wps=sync_wps,
             )
             return WebQueryResponse(
                 results=[
@@ -462,7 +464,7 @@ def test_automatic_shop_task_reads_pending_then_queries_and_syncs(tmp_path, monk
         )
         called = {}
 
-        def fake_query(user_id, items, airscript_config):
+        def fake_query(user_id, items, airscript_config, *, sync_wps=True):
             called.update(user_id=user_id, items=items, config=airscript_config)
             return WebQueryResponse(
                 [
@@ -520,7 +522,23 @@ def test_automatic_shop_task_cleans_details_when_no_pending_fba(
             def list_pending_tracking_items(self):
                 return []
 
-            def sync_tracking_results(self, results):
+            def snapshot_tracking_results(self, results):
+                return [{
+                    "targetType": "row",
+                    "sheetName": "US-轨迹明细",
+                    "matchHeader": "事件编号",
+                    "matchValue": "old-event",
+                    "itemKey": "FBA99999",
+                    "reason": "cleanup",
+                    "field": "__row__",
+                    "value": {"event_id": "old-event", "fba": "FBA99999"},
+                    "comparableValue": {"event_id": "old-event", "fba": "FBA99999"},
+                }]
+
+            def snapshot_targets(self, targets):
+                return [{**targets[0], "value": None, "comparableValue": None}]
+
+            def sync_tracking_results(self, results, preconditions=None):
                 calls.append(results)
                 return AirScriptSyncSummary(detail_rows_removed=7)
 

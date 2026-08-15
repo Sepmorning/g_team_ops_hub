@@ -97,6 +97,7 @@
 const inventoryStatus=document.querySelector('#inventoryStatus');
 let inventoryConfig=null;
 let previewId='';
+const inventoryRequestKey=()=>globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 function showInventory(message,kind='info'){GTeam.showStatus(inventoryStatus,message,kind);window.scrollTo({top:0,behavior:'smooth'})}
 function valueText(value){return value===null||value===undefined?'—':String(value)}
@@ -171,7 +172,7 @@ async function applyListing(button){
   if(!previewId)return;
   if(!confirm('确认把本次数据写入所选Listing子表？同日重试只修正本次值；更晚日期会滚动上次值。'))return;
   GTeam.buttonBusy(button,true,'正在更新共享表…');
-  try{const data=await GTeam.api('/api/inventory/imports/apply',{method:'POST',body:{preview_id:previewId}});showInventory(data.message,'ok')}
+  try{const data=await GTeam.api('/api/inventory/imports/apply',{method:'POST',headers:{'Idempotency-Key':inventoryRequestKey()},body:{preview_id:previewId}});showInventory(data.message,'ok')}
   catch(e){showInventory(e.message,'error')}finally{GTeam.buttonBusy(button,false)}
 }
 

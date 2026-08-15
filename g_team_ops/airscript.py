@@ -24,7 +24,8 @@ TARGET_SHEET_NAME = "US-FBA"
 DEFAULT_DETAIL_SHEET_NAME = "US-轨迹明细"
 AIRSCRIPT_WRITE_BATCH_SIZE = 50
 AIRSCRIPT_RICH_WRITE_BATCH_SIZE = 10
-REQUIRED_AIRSCRIPT_SCHEMA_VERSION = 10
+AIRSCRIPT_CHANGE_BATCH_SIZE = 300
+REQUIRED_AIRSCRIPT_SCHEMA_VERSION = 11
 
 
 def parse_share_file_id(share_url: str) -> str:
@@ -170,6 +171,50 @@ def _cell_change_list(value: Any) -> list[AirScriptCellChange]:
             )
         )
     return changes
+
+
+def _snapshot_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ResponseError("AirScript响应中缺少共享表快照")
+    snapshots: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ResponseError("AirScript共享表快照项目结构无效")
+        snapshots.append(dict(item))
+    return snapshots
+
+
+def tracking_summary_from_payload(value: dict[str, Any]) -> AirScriptSyncSummary:
+    return AirScriptSyncSummary(
+        updated=_string_list(value.get("updated")),
+        audit_only=_string_list(value.get("audit_only")),
+        unchanged=_string_list(value.get("unchanged")),
+        not_in_sheet=_string_list(value.get("not_in_sheet")),
+        duplicate_rows=_string_list(value.get("duplicate_rows")),
+        skipped=_string_list(value.get("skipped")),
+        failures=_string_list(value.get("failures")),
+        conflicts=_string_list(value.get("conflicts")),
+        updated_cells=_cell_change_list(
+            [
+                {
+                    "fba": item.get("fba"),
+                    "row": item.get("row"),
+                    "address": item.get("address"),
+                    "field": item.get("field"),
+                    "header": item.get("header"),
+                    "oldValue": item.get("old_value"),
+                    "newValue": item.get("new_value"),
+                }
+                for item in value.get("updated_cells", [])
+                if isinstance(item, dict)
+            ]
+        ),
+        format_failures=_string_list(value.get("format_failures")),
+        events_added=int(value.get("events_added") or 0),
+        events_updated=int(value.get("events_updated") or 0),
+        events_unchanged=int(value.get("events_unchanged") or 0),
+        detail_rows_removed=int(value.get("detail_rows_removed") or 0),
+    )
 
 
 class AirScriptClient:
@@ -397,15 +442,17 @@ class AirScriptClient:
             offset = next_offset
         raise ResponseError("AirScript待读取分页超过安全上限，请检查表格使用区域")
 
-    def sync_tracking_results(
-        self, results: list[TrackingResult]
-    ) -> AirScriptSyncSummary:
-        summary = AirScriptSyncSummary()
+    @staticmethod
+    def _tracking_items(
+        results: list[TrackingResult],
+        summary: AirScriptSyncSummary | None = None,
+    ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for result in results:
             route = _format_route(result)
             if result.status != QueryStatus.SUCCESS or not route:
-                summary.skipped.append(result.fba)
+                if summary is not None:
+                    summary.skipped.append(result.fba)
                 continue
             item: dict[str, Any] = {"fba": result.fba, "route": route}
             if result.snapshot is not None:
@@ -414,9 +461,109 @@ class AirScriptClient:
                 item["main"] = main
                 item["events"] = [event.to_dict() for event in result.events]
             items.append(item)
+        return items
+
+    def snapshot_tracking_results(
+        self, results: list[TrackingResult]
+    ) -> list[dict[str, Any]]:
+        items = self._tracking_items(results)
+        rich = any("main" in item for item in items)
+        batch_size = AIRSCRIPT_RICH_WRITE_BATCH_SIZE if rich else AIRSCRIPT_WRITE_BATCH_SIZE
+        batches = [items[index : index + batch_size] for index in range(0, len(items), batch_size)] or [[]]
+        snapshots: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for index, batch in enumerate(batches):
+            result = self._execute(
+                "snapshot",
+                batch,
+                {"include_cleanup": index == 0},
+            )
+            self._require_schema(result)
+            for item in _snapshot_list(result.get("snapshots")):
+                key = (
+                    str(item.get("targetType") or ""),
+                    str(item.get("sheetName") or ""),
+                    str(item.get("matchValue") or ""),
+                    str(item.get("field") or ""),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    snapshots.append(item)
+        return snapshots
+
+    def snapshot_targets(
+        self, targets: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        snapshots: list[dict[str, Any]] = []
+        for offset in range(0, len(targets), AIRSCRIPT_CHANGE_BATCH_SIZE):
+            batch = targets[offset : offset + AIRSCRIPT_CHANGE_BATCH_SIZE]
+            result = self._execute(
+                "snapshot_targets",
+                [],
+                {"targets": batch},
+            )
+            self._require_schema(result)
+            snapshots.extend(_snapshot_list(result.get("snapshots")))
+        return snapshots
+
+    def inspect_changes(
+        self,
+        changes: list[dict[str, Any]],
+        *,
+        direction: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        aggregate = {"ready": [], "alreadyApplied": [], "conflicts": [], "failures": []}
+        for offset in range(0, len(changes), AIRSCRIPT_CHANGE_BATCH_SIZE):
+            result = self._execute(
+                "inspect_changes",
+                [],
+                {"changes": changes[offset : offset + AIRSCRIPT_CHANGE_BATCH_SIZE], "direction": direction, "index_offset": offset},
+            )
+            self._require_schema(result)
+            for key in aggregate:
+                aggregate[key].extend(
+                    [item for item in result.get(key, []) if isinstance(item, dict)]
+                )
+        return aggregate
+
+    def apply_changes(
+        self,
+        changes: list[dict[str, Any]],
+        *,
+        direction: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        aggregate = {"applied": [], "alreadyApplied": [], "conflicts": [], "failures": []}
+        for offset in range(0, len(changes), AIRSCRIPT_CHANGE_BATCH_SIZE):
+            try:
+                result = self._execute(
+                    "apply_changes",
+                    [],
+                    {"changes": changes[offset : offset + AIRSCRIPT_CHANGE_BATCH_SIZE], "direction": direction, "index_offset": offset},
+                )
+            except CarrierError as exc:
+                exc.partial_change_result = aggregate
+                raise
+            self._require_schema(result)
+            for key in aggregate:
+                aggregate[key].extend(
+                    [item for item in result.get(key, []) if isinstance(item, dict)]
+                )
+        return aggregate
+
+    def sync_tracking_results(
+        self,
+        results: list[TrackingResult],
+        preconditions: list[dict[str, Any]] | None = None,
+    ) -> AirScriptSyncSummary:
+        summary = AirScriptSyncSummary()
+        items = self._tracking_items(results, summary)
         if not items:
             # 即使本次全部查询失败或主表已无活跃FBA，也要安全清理已完成货件明细。
-            result = self._execute("sync_tracking", [])
+            result = self._execute(
+                "sync_tracking",
+                [],
+                {"preconditions": preconditions or []},
+            )
             self._require_schema(result)
             summary.detail_rows_removed += int(
                 result.get("detailRowsRemoved") or 0
@@ -430,8 +577,19 @@ class AirScriptClient:
         # 富轨迹包含多条明细事件，使用更小批次避免WPS脚本负载过大。
         for offset in range(0, len(items), write_batch_size):
             batch = items[offset : offset + write_batch_size]
+            batch_keys = {str(item.get("fba") or "").upper() for item in batch}
+            batch_preconditions = [
+                item
+                for item in (preconditions or [])
+                if str(item.get("itemKey") or "").upper() in batch_keys
+                or (offset == 0 and str(item.get("reason") or "") == "cleanup")
+            ]
             try:
-                result = self._execute(action, batch)
+                result = self._execute(
+                    action,
+                    batch,
+                    {"preconditions": batch_preconditions},
+                )
                 if rich:
                     self._require_schema(result)
             except (NetworkError, AuthenticationError, RateLimitError, ServerError, ResponseError) as exc:

@@ -16,7 +16,11 @@ from xml.etree import ElementTree
 
 import requests
 
-from .airscript import parse_share_file_id, validate_webhook_url
+from .airscript import (
+    AIRSCRIPT_CHANGE_BATCH_SIZE,
+    parse_share_file_id,
+    validate_webhook_url,
+)
 from .errors import (
     AuthenticationError,
     ConfigurationError,
@@ -33,7 +37,7 @@ MAX_XLSX_ENTRIES = 2_000
 MAX_LISTING_ROWS = 20_000
 LISTING_WRITE_BATCH_SIZE = 50
 LISTING_PREVIEW_TTL_SECONDS = 20 * 60
-REQUIRED_LISTING_SCRIPT_VERSION = 3
+REQUIRED_LISTING_SCRIPT_VERSION = 4
 
 SOURCE_HEADERS = (
     "MSKU",
@@ -596,6 +600,29 @@ def _string_list(value: Any) -> list[str]:
     return [str(item) for item in value]
 
 
+def _listing_snapshot_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ResponseError("Listing AirScript响应中缺少共享表快照")
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ResponseError("Listing AirScript快照项目结构无效")
+        result.append(dict(item))
+    return result
+
+
+def listing_summary_from_payload(value: dict[str, Any]) -> ListingSyncSummary:
+    return ListingSyncSummary(
+        updated=_string_list(value.get("updated")),
+        same_date_updated=_string_list(value.get("same_date_updated")),
+        stale=_string_list(value.get("stale")),
+        not_in_sheet=_string_list(value.get("not_in_sheet")),
+        duplicate_rows=_string_list(value.get("duplicate_rows")),
+        conflicts=_string_list(value.get("conflicts")),
+        failures=_string_list(value.get("failures")),
+    )
+
+
 class ListingAirScriptClient:
     def __init__(
         self,
@@ -617,16 +644,23 @@ class ListingAirScriptClient:
         self.retries = max(0, retries)
 
     def _execute(
-        self, action: str, items: list[dict[str, Any]], data_date: str = ""
+        self,
+        action: str,
+        items: list[dict[str, Any]],
+        data_date: str = "",
+        arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        argv = {
+            "action": action,
+            "sheet_name": self.config.sheet_name,
+            "data_date": data_date,
+            "items": items,
+        }
+        if arguments:
+            argv.update(arguments)
         payload = {
             "Context": {
-                "argv": {
-                    "action": action,
-                    "sheet_name": self.config.sheet_name,
-                    "data_date": data_date,
-                    "items": items,
-                }
+                "argv": argv
             }
         }
         headers = {
@@ -762,16 +796,98 @@ class ListingAirScriptClient:
             raise ResponseError("Listing AirScript没有返回任何可识别子表")
         return parsed
 
+    def snapshot_rows(
+        self, rows: tuple[ListingRow, ...]
+    ) -> list[dict[str, Any]]:
+        payload_rows = [row.to_payload() for row in rows]
+        snapshots: list[dict[str, Any]] = []
+        for offset in range(0, len(payload_rows), LISTING_WRITE_BATCH_SIZE):
+            result = self._execute(
+                "snapshot",
+                payload_rows[offset : offset + LISTING_WRITE_BATCH_SIZE],
+            )
+            snapshots.extend(_listing_snapshot_list(result.get("snapshots")))
+        return snapshots
+
+    def snapshot_targets(
+        self, targets: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        snapshots: list[dict[str, Any]] = []
+        for offset in range(0, len(targets), AIRSCRIPT_CHANGE_BATCH_SIZE):
+            result = self._execute(
+                "snapshot_targets",
+                [],
+                arguments={"targets": targets[offset : offset + AIRSCRIPT_CHANGE_BATCH_SIZE]},
+            )
+            snapshots.extend(_listing_snapshot_list(result.get("snapshots")))
+        return snapshots
+
+    def inspect_changes(
+        self,
+        changes: list[dict[str, Any]],
+        *,
+        direction: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        aggregate = {"ready": [], "alreadyApplied": [], "conflicts": [], "failures": []}
+        for offset in range(0, len(changes), AIRSCRIPT_CHANGE_BATCH_SIZE):
+            result = self._execute(
+                "inspect_changes",
+                [],
+                arguments={"changes": changes[offset : offset + AIRSCRIPT_CHANGE_BATCH_SIZE], "direction": direction, "index_offset": offset},
+            )
+            for key in aggregate:
+                aggregate[key].extend(
+                    [item for item in result.get(key, []) if isinstance(item, dict)]
+                )
+        return aggregate
+
+    def apply_changes(
+        self,
+        changes: list[dict[str, Any]],
+        *,
+        direction: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        aggregate = {"applied": [], "alreadyApplied": [], "conflicts": [], "failures": []}
+        for offset in range(0, len(changes), AIRSCRIPT_CHANGE_BATCH_SIZE):
+            try:
+                result = self._execute(
+                    "apply_changes",
+                    [],
+                    arguments={"changes": changes[offset : offset + AIRSCRIPT_CHANGE_BATCH_SIZE], "direction": direction, "index_offset": offset},
+                )
+            except CarrierError as exc:
+                exc.partial_change_result = aggregate
+                raise
+            for key in aggregate:
+                aggregate[key].extend(
+                    [item for item in result.get(key, []) if isinstance(item, dict)]
+                )
+        return aggregate
+
     def sync(
-        self, rows: tuple[ListingRow, ...], data_date: str
+        self,
+        rows: tuple[ListingRow, ...],
+        data_date: str,
+        preconditions: list[dict[str, Any]] | None = None,
     ) -> ListingSyncSummary:
         data_date = validate_listing_data_date(data_date)
         summary = ListingSyncSummary()
         payload_rows = [row.to_payload() for row in rows]
         for offset in range(0, len(payload_rows), LISTING_WRITE_BATCH_SIZE):
             batch = payload_rows[offset : offset + LISTING_WRITE_BATCH_SIZE]
+            batch_keys = {str(item.get("msku") or "").strip().upper() for item in batch}
+            batch_preconditions = [
+                item
+                for item in (preconditions or [])
+                if str(item.get("itemKey") or "").strip().upper() in batch_keys
+            ]
             try:
-                result = self._execute("sync", batch, data_date)
+                result = self._execute(
+                    "sync",
+                    batch,
+                    data_date,
+                    {"preconditions": batch_preconditions},
+                )
             except (
                 NetworkError,
                 AuthenticationError,
