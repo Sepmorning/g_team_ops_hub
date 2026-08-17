@@ -66,6 +66,70 @@ def test_web_setup_login_and_private_pages(tmp_path):
         assert "账号管理" in client.get("/admin").text
 
 
+def test_local_ui_assets_and_dashboard_effect_scope(tmp_path):
+    app = create_app(tmp_path / "data")
+    with TestClient(app) as client:
+        setup = client.get("/setup")
+        assert setup.status_code == 200
+        assert 'href="/static/theme.css"' in setup.text
+        assert 'data-page="auth"' in setup.text
+        assert "/static/wallpapers/auth.webp" not in setup.text
+        assert "https://" not in setup.text
+
+        bootstrap_and_login(client)
+        dashboard = client.get("/dashboard")
+        assert dashboard.status_code == 200
+        assert 'href="/static/theme.css"' in dashboard.text
+        assert 'id="petalCanvas"' in dashboard.text
+        assert 'src="/static/petals.js"' in dashboard.text
+        assert "data-theme-toggle" in dashboard.text
+        assert "data-motion-toggle" in dashboard.text
+        assert 'class="portal-dock"' in dashboard.text
+        assert 'class="portal-topbar"' in dashboard.text
+        assert 'id="appSidebar"' not in dashboard.text
+        assert "https://" not in dashboard.text
+
+        tracking = client.get("/tracking")
+        assert tracking.status_code == 200
+        assert 'data-page="tracking"' in tracking.text
+        assert 'id="appSidebar"' in tracking.text
+        assert 'id="petalCanvas"' not in tracking.text
+        assert 'src="/static/petals.js"' not in tracking.text
+
+        assert client.get("/static/theme.css").status_code == 200
+        app_css = client.get("/static/app.css")
+        assert app_css.status_code == 200
+        assert ".petal-canvas { position: fixed; inset: 0; z-index: 8;" in app_css.text
+        assert "pointer-events: none" in app_css.text
+        assert "linear-gradient(rgba(244, 247, 252, .2), rgba(232, 239, 249, .3))" in app_css.text
+        assert "linear-gradient(rgba(10, 17, 29, .32), rgba(10, 17, 29, .46))" in app_css.text
+        assert ".main-inner > .page-head" in app_css.text
+        assert "background: var(--surface-solid);" in app_css.text
+        assert "backdrop-filter: none;" in app_css.text
+        petals = client.get("/static/petals.js")
+        assert petals.status_code == 200
+        assert "requestAnimationFrame" in petals.text
+        assert "document.hidden" in petals.text
+        assert "width < 700 ? 14 : width < 1100 ? 28 : 48" in petals.text
+
+        wallpaper_names = (
+            "dashboard",
+            "tracking",
+            "carriers",
+            "shops",
+            "inventory",
+            "operations",
+            "admin",
+            "auth",
+        )
+        for name in wallpaper_names:
+            asset = client.get(f"/static/wallpapers/{name}.webp")
+            assert asset.status_code == 200
+            assert asset.headers["content-type"] == "image/webp"
+            assert len(asset.content) < 500_000
+            assert f'/static/wallpapers/{name}.webp' in app_css.text
+
+
 def test_query_api_reuses_coordinator_and_returns_all_results(tmp_path):
     app = create_app(tmp_path / "data")
     with TestClient(app) as client:

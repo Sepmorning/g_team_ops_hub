@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import mimetypes
 import secrets
 import sys
 from pathlib import Path
@@ -36,6 +37,11 @@ def _web_assets() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS) / "g_team_ops" / "web"
     return Path(__file__).resolve().parent
+
+
+def _register_static_media_types() -> None:
+    """补齐部分Windows环境缺失的现代静态资源类型。"""
+    mimetypes.add_type("image/webp", ".webp")
 
 
 def _session_secret(data_dir: Path) -> str:
@@ -94,6 +100,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         https_only=False,
         max_age=8 * 60 * 60,
     )
+    _register_static_media_types()
     assets = _web_assets()
     templates = Jinja2Templates(directory=str(assets / "templates"))
     app.mount(
