@@ -116,7 +116,49 @@ def build_router(ctx: WebContext) -> APIRouter:
             "message": (
                 f"已连接“{binding.sheet_name}”，"
                 f"表头位于第{binding.header_row}行，"
-                f"已按名称识别{len(binding.columns)}列"
+                f"已按名称识别{len(binding.columns)}列；"
+                f"规则版本 {binding.rule_version}，"
+                f"公式行 {binding.configured_formula_rows}，"
+                f"人工月销 {binding.manual_override_rows} 行"
+            ),
+        }
+
+    @router.post("/api/inventory/countries/{country_id}/rules/setup")
+    async def setup_listing_rules_api(country_id: str, request: Request):
+        account = ctx.require_api_user(request)
+        check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await ctx.json_payload(request)
+        shop_id = str(payload.get("shop_id") or "").strip()
+        database = ctx.database_for(account.id)
+        try:
+            config, shop, country = ctx.listing_config(
+                database,
+                shop_id,
+                country_id,
+            )
+            binding = await asyncio.to_thread(
+                ListingAirScriptClient(
+                    config,
+                    retries=ctx.coordinator.settings.retries,
+                ).setup_rules
+            )
+        except (CarrierError, ConfigurationError) as exc:
+            return json_error(exc.user_message)
+        ctx.logger.info(
+            "listing_rules_setup user=%s shop=%s country=%s version=%s rows=%d manual=%d",
+            account.id,
+            shop_id,
+            country_id,
+            binding.rule_version,
+            binding.configured_formula_rows,
+            binding.manual_override_rows,
+        )
+        return {
+            "ok": True,
+            "message": (
+                f"{shop.name} / {country.country_name}：规则配置已就绪；"
+                f"版本 {binding.rule_version}，公式行 {binding.configured_formula_rows}，"
+                f"保留人工最终月销 {binding.manual_override_rows} 行"
             ),
         }
 
@@ -167,6 +209,7 @@ def build_router(ctx: WebContext) -> APIRouter:
                 data_date,
                 filename,
                 parsed,
+                binding.rule_version,
             )
         except (CarrierError, ConfigurationError) as exc:
             return json_error(exc.user_message)
@@ -197,7 +240,13 @@ def build_router(ctx: WebContext) -> APIRouter:
             "row_count": len(parsed.rows),
             "duplicate_mskus": list(parsed.duplicate_mskus),
             "skipped_rows": list(parsed.skipped_rows),
+            "data_warnings": list(parsed.data_warnings),
             "ignored_headers": list(parsed.ignored_headers),
+            "rules": {
+                "version": binding.rule_version,
+                "formula_rows": binding.configured_formula_rows,
+                "manual_override_rows": binding.manual_override_rows,
+            },
             "discount_price": {
                 "source_present": parsed.has_discount_price,
                 "target_present": "discount_price" in binding.columns,
@@ -227,6 +276,11 @@ def build_router(ctx: WebContext) -> APIRouter:
                 config,
                 retries=ctx.coordinator.settings.retries,
             )
+            current_binding = await asyncio.to_thread(client.validate)
+            if current_binding.rule_version != pending.rule_version:
+                raise ConfigurationError(
+                    "规则版本在预览后发生变化，请重新预览再执行回填"
+                )
             guarded = await asyncio.to_thread(
                 operation_manager.execute,
                 profile_id=account.id,
@@ -243,6 +297,7 @@ def build_router(ctx: WebContext) -> APIRouter:
                     pending.parsed.rows,
                     pending.data_date,
                     preconditions=before,
+                    expected_rule_version=pending.rule_version,
                 ),
                 snapshot_after=client.snapshot_targets,
                 serialize_result=asdict,
@@ -252,6 +307,7 @@ def build_router(ctx: WebContext) -> APIRouter:
                     "filename": pending.filename,
                     "data_date": pending.data_date,
                     "row_count": len(pending.parsed.rows),
+                    "rule_version": current_binding.rule_version,
                 },
             )
             summary = guarded.business_result

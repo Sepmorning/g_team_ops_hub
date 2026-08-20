@@ -41,6 +41,10 @@
     <div class="field full">
       <label>模块连接状态</label>
       <div id="connectionHint" class="status show info" style="margin:0">正在读取店铺配置…</div>
+      <div class="actions" style="margin-top:10px">
+        <button class="btn" type="button" onclick="setupListingRules(this)">初始化 / 检查规则配置</button>
+        <span class="muted">只补齐“规则配置”工作表和标准公式，保留人工最终月销。</span>
+      </div>
     </div>
   </div>
 </section>
@@ -80,9 +84,9 @@
   <div class="table-wrap">
     <table style="min-width:1180px">
       <thead><tr>
-        <th>MSKU</th><th>ASIN</th><th>优惠价</th><th>评分 / 评论数</th><th>昨日广告费</th>
+        <th>MSKU</th><th>ASIN</th><th>价格 / 优惠价</th><th>评分/评论数</th><th>昨日 / 7 / 14 / 30日广告费</th>
         <th>FBA可售</th><th>预留</th><th>在途</th>
-        <th>7 / 14 / 30日销量</th><th>系统建议月销</th>
+        <th>7 / 14 / 30日销量</th><th>7 / 14 / 30日销售额</th><th>数据检查</th>
       </tr></thead>
       <tbody id="previewRows"></tbody>
     </table>
@@ -137,6 +141,16 @@ async function validateSelectedSite(){
   }catch(e){GTeam.showStatus(connectionHint,e.message,'error')}
 }
 
+async function setupListingRules(button){
+  if(!shopSelect.value||!countrySelect.value){showInventory('请先选择店铺和国家站点','error');return}
+  if(!confirm('确认初始化或检查“规则配置”工作表，并为缺失的计算单元格补齐标准公式？人工填写的最终补货月销不会被覆盖。'))return;
+  GTeam.buttonBusy(button,true,'正在初始化…');
+  try{
+    const data=await GTeam.api(`/api/inventory/countries/${countrySelect.value}/rules/setup`,{method:'POST',body:{shop_id:shopSelect.value}});
+    GTeam.showStatus(connectionHint,data.message,'ok');
+  }catch(e){GTeam.showStatus(connectionHint,e.message,'error')}finally{GTeam.buttonBusy(button,false)}
+}
+
 function inferFileDate(){
   const match=listingFile.files[0]?.name.match(/(?:^|\D)(20\d{6})(?:\D|$)/);
   if(match){dataDate.value=`${match[1].slice(0,4)}-${match[1].slice(4,6)}-${match[1].slice(6,8)}`}
@@ -153,7 +167,9 @@ async function previewListing(button){
     const warnings=[];
     if(data.duplicate_mskus.length)warnings.push(`文件内重复MSKU已跳过：${data.duplicate_mskus.join('、')}`);
     if(data.skipped_rows.length)warnings.push(`无效行已跳过：${data.skipped_rows.join('；')}`);
+    if(data.data_warnings.length)warnings.push(`销量窗口异常：${data.data_warnings.join('；')}`);
     if(data.ignored_headers.length)warnings.push(`已忽略新增列：${data.ignored_headers.join('、')}`);
+    if(data.rules?.version)warnings.push(`共享表规则版本 ${data.rules.version}；公式行 ${data.rules.formula_rows}；人工最终月销 ${data.rules.manual_override_rows} 行`);
     if(data.discount_price?.will_update)warnings.push('两份表均已识别“优惠价”，本次将同步；领星空值会清除共享表旧优惠价');
     else if(data.discount_price?.source_present)warnings.push('领星文件有“优惠价”，但共享表没有该列，本次已忽略优惠价');
     else if(data.discount_price?.target_present)warnings.push('共享表有“优惠价”，但领星文件没有该列，本次不会修改原优惠价');
@@ -161,7 +177,7 @@ async function previewListing(button){
     previewRows.replaceChildren();
     data.sample.forEach(item=>{
       const tr=document.createElement('tr');
-      const cells=[item.msku,item.asin,valueText(item.discount_price),`${valueText(item.rating)} / ${valueText(item.review_count)}`,valueText(item.yesterday_ad_spend),valueText(item.fba_available),valueText(item.reserved),valueText(item.inbound),`${valueText(item.sales_7d)} / ${valueText(item.sales_14d)} / ${valueText(item.sales_30d)}`,valueText(item.system_monthly_sales)];
+      const cells=[item.msku,item.asin,`${valueText(item.price)} / ${valueText(item.discount_price)}`,valueText(item.rating_review),`${valueText(item.yesterday_ad_spend)} / ${valueText(item.ad_spend_7d)} / ${valueText(item.ad_spend_14d)} / ${valueText(item.ad_spend_30d)}`,valueText(item.fba_available),valueText(item.reserved),valueText(item.inbound),`${valueText(item.sales_7d)} / ${valueText(item.sales_14d)} / ${valueText(item.sales_30d)}`,`${valueText(item.revenue_7d)} / ${valueText(item.revenue_14d)} / ${valueText(item.revenue_30d)}`,item.source_warning||'通过'];
       cells.forEach(value=>{const td=document.createElement('td');td.textContent=value;tr.append(td)});previewRows.append(tr);
     });
     previewCard.classList.remove('hidden');previewCard.scrollIntoView({behavior:'smooth'});

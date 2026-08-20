@@ -44,6 +44,7 @@ EXPECTED_HTTP_ROUTES = {
     ("GET", "/api/inventory/config"),
     ("DELETE", "/api/inventory/countries/{country_id}"),
     ("POST", "/api/inventory/countries/{country_id}/validation"),
+    ("POST", "/api/inventory/countries/{country_id}/rules/setup"),
     ("POST", "/api/inventory/imports/preview"),
     ("POST", "/api/inventory/imports/apply"),
     ("GET", "/operations"),

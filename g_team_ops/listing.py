@@ -10,7 +10,6 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 from xml.etree import ElementTree
 
@@ -37,44 +36,111 @@ MAX_XLSX_ENTRIES = 2_000
 MAX_LISTING_ROWS = 20_000
 LISTING_WRITE_BATCH_SIZE = 50
 LISTING_PREVIEW_TTL_SECONDS = 20 * 60
-REQUIRED_LISTING_SCRIPT_VERSION = 4
+REQUIRED_LISTING_SCRIPT_VERSION = 5
 
 SOURCE_HEADERS = (
     "MSKU",
     "ASIN",
-    "币种",
     "价格",
     "FBA可售",
     "FBA待调仓",
     "FBA预留",
     "FBA计划入库",
     "FBA标发在途",
-    "FBA入库中",
-    "FBA不可售",
     "7日销量",
     "14日销量",
     "30日销量",
     "昨日广告费",
+    "7日广告费",
+    "14日广告费",
+    "30日广告费",
+    "7日销售额",
+    "14日销售额",
+    "30日销售额",
     "Rating总数",
     "评分",
 )
 
 OPTIONAL_SOURCE_HEADERS = ("优惠价",)
 
+# 领星“全部字段”导出中已知但本模块不使用的列。它们不会出现在“未知列”警告中，
+# 也不会被写入共享表，避免完整导出每次都产生几十条无意义提示。
+KNOWN_UNUSED_SOURCE_HEADERS = (
+    "币种",
+    "FBA入库中",
+    "FBA不可售",
+    "FNSKU",
+    "状态",
+    "父ASIN",
+    "标题",
+    "店铺",
+    "国家",
+    "配送方式",
+    "亚马逊品牌",
+    "商品编码",
+    "商品编码类型",
+    "变体属性",
+    "品名",
+    "SKU",
+    "分类",
+    "本地品牌",
+    "商品标签",
+    "售价(总价)",
+    "运费",
+    "积分",
+    "B2B价格",
+    "B2B数量折扣",
+    "List Price",
+    "划线价",
+    "划线价类型",
+    "预估FBA费（API）",
+    "预估FBA费（报表）",
+    "平台费",
+    "FBM库存",
+    "昨日销量",
+    "7日均销量",
+    "14日均销量",
+    "30日均销量",
+    "昨日销售额",
+    "大类排名",
+    "大类名称",
+    "小类1",
+    "小类2",
+    "小类3",
+    "小类4",
+    "小类5",
+    "创建时间",
+    "开售时间",
+    "首单时间",
+    "负责人1（业绩归属人）",
+    "负责人2",
+    "负责人3",
+    "负责人4",
+    "负责人5",
+    "负责人6",
+    "负责人7",
+    "负责人8",
+    "负责人9",
+    "负责人10",
+    "备注",
+)
+
 TARGET_HEADERS = (
     "MSKU",
     "品名",
     "ASIN",
-    "Listing状态",
+    "补货状态",
     "价格",
     "本次数据日期",
     "上次数据日期",
-    "评分",
-    "评论数",
-    "上次评分",
-    "上次评论数",
+    "评分/评论数",
+    "上次评分/评论数",
     "昨日广告费",
     "上次昨日广告费",
+    "7日广告费",
+    "14日广告费",
+    "30日广告费",
+    "30日广告费率",
     "FBA可售",
     "预留",
     "在途",
@@ -87,21 +153,22 @@ TARGET_HEADERS = (
     "上次7日销量",
     "上次14日销量",
     "上次30日销量",
-    "7日均销",
-    "14日均销",
-    "30日均销",
-    "7日折算月销",
-    "月销差异",
-    "月销差异率",
-    "销量趋势",
+    "7日销售额",
+    "14日销售额",
+    "30日销售额",
+    "30日实际成交均价",
+    "趋势差异率",
+    "销量状态",
+    "预测可信度",
+    "异常原因",
     "系统建议月销",
     "最终补货月销",
-    "在库覆盖月数",
-    "含在途覆盖月数",
+    "在库覆盖天数",
+    "含在途覆盖天数",
     "建议补货量",
-    "链接情况",
-    "库存情况",
-    "广告情况",
+    "链接状态",
+    "库存状态",
+    "广告状态",
     "运营备注",
     "本次更新时间",
 )
@@ -145,21 +212,40 @@ def _sum_optional(
     return (left or 0) + (right or 0)
 
 
-def calculate_system_monthly_sales(
-    sales_7d: int | float | None, sales_30d: int | float | None
-) -> int | None:
-    """与共享表公式一致：无数据留空，有数据时始终给出可复核的建议值。"""
-    if sales_7d is None or sales_30d is None:
+def _display_number(value: int | float | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, int) or float(value).is_integer():
+        return str(int(value))
+    return format(float(value), ".15g")
+
+
+def _rating_review_text(
+    rating: int | float | None,
+    review_count: int | float | None,
+) -> str | None:
+    if rating is None and review_count is None:
         return None
-    converted = sales_7d * 4
-    if converted == 0 and sales_30d == 0:
-        return 0
-    if sales_30d == 0:
-        return int(Decimal(str(converted)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    if converted == 0:
-        return int(Decimal(str(sales_30d)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    average = (Decimal(str(converted)) + Decimal(str(sales_30d))) / 2
-    return int(average.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return f"{_display_number(rating)}/{_display_number(review_count)}"
+
+
+def sales_window_warning(
+    sales_7d: int | float | None,
+    sales_14d: int | float | None,
+    sales_30d: int | float | None,
+) -> str:
+    """检查领星滚动累计窗口，不静默修正倒挂数据。"""
+    if sales_7d is None or sales_14d is None or sales_30d is None:
+        return "销量窗口数据不完整"
+    if sales_7d < 0 or sales_14d < 0 or sales_30d < 0:
+        return "销量窗口存在负数"
+    if sales_7d < 0 or sales_14d < 0 or sales_30d < 0:
+        return "销量窗口存在负数"
+    if sales_7d > sales_14d:
+        return "7日销量大于14日销量"
+    if sales_14d > sales_30d:
+        return "14日销量大于30日销量"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -167,16 +253,23 @@ class ListingRow:
     source_row: int
     msku: str
     asin: str
+    price: int | float | None
     rating: int | float | None
     review_count: int | float | None
     yesterday_ad_spend: int | float | None
+    ad_spend_7d: int | float | None
+    ad_spend_14d: int | float | None
+    ad_spend_30d: int | float | None
     fba_available: int | float | None
     reserved: int | float | None
     inbound: int | float | None
     sales_7d: int | float | None
     sales_14d: int | float | None
     sales_30d: int | float | None
-    system_monthly_sales: int | None
+    revenue_7d: int | float | None
+    revenue_14d: int | float | None
+    revenue_30d: int | float | None
+    source_warning: str = ""
     discount_price: int | float | None = None
     discount_price_present: bool = False
 
@@ -185,21 +278,34 @@ class ListingRow:
             "msku": self.msku,
             "asin": self.asin,
         }
+        rating_review = _rating_review_text(self.rating, self.review_count)
+        if rating_review is not None:
+            payload["rating_review"] = rating_review
         for key in (
-            "rating",
-            "review_count",
-            "yesterday_ad_spend",
+            "price",
             "fba_available",
             "reserved",
             "inbound",
-            "sales_7d",
-            "sales_14d",
-            "sales_30d",
-            "system_monthly_sales",
         ):
             value = getattr(self, key)
             if value is not None:
                 payload[key] = value
+        # 这些周期指标代表本次导出的完整观测值。空白必须清除旧值，
+        # 否则共享表会把上次周期数据误当成本次数据继续生成补货建议。
+        for key in (
+            "yesterday_ad_spend",
+            "ad_spend_7d",
+            "ad_spend_14d",
+            "ad_spend_30d",
+            "sales_7d",
+            "sales_14d",
+            "sales_30d",
+            "revenue_7d",
+            "revenue_14d",
+            "revenue_30d",
+        ):
+            value = getattr(self, key)
+            payload[key] = value if value is not None else ""
         if self.discount_price_present:
             # 有“优惠价”表头但单元格为空，表示当前没有优惠，必须清除共享表旧值。
             payload["discount_price"] = (
@@ -212,16 +318,24 @@ class ListingRow:
             "source_row": self.source_row,
             "msku": self.msku,
             "asin": self.asin,
+            "price": self.price,
             "rating": self.rating,
             "review_count": self.review_count,
+            "rating_review": _rating_review_text(self.rating, self.review_count),
             "yesterday_ad_spend": self.yesterday_ad_spend,
+            "ad_spend_7d": self.ad_spend_7d,
+            "ad_spend_14d": self.ad_spend_14d,
+            "ad_spend_30d": self.ad_spend_30d,
             "fba_available": self.fba_available,
             "reserved": self.reserved,
             "inbound": self.inbound,
             "sales_7d": self.sales_7d,
             "sales_14d": self.sales_14d,
             "sales_30d": self.sales_30d,
-            "system_monthly_sales": self.system_monthly_sales,
+            "revenue_7d": self.revenue_7d,
+            "revenue_14d": self.revenue_14d,
+            "revenue_30d": self.revenue_30d,
+            "source_warning": self.source_warning,
             "discount_price": (
                 self.discount_price if self.discount_price_present else None
             ),
@@ -236,6 +350,7 @@ class ParsedListingExport:
     rows: tuple[ListingRow, ...]
     duplicate_mskus: tuple[str, ...] = ()
     skipped_rows: tuple[str, ...] = ()
+    data_warnings: tuple[str, ...] = ()
 
     @property
     def has_discount_price(self) -> bool:
@@ -246,7 +361,11 @@ class ParsedListingExport:
     def ignored_headers(self) -> tuple[str, ...]:
         known = {
             _normalize_header(item)
-            for item in (*SOURCE_HEADERS, *OPTIONAL_SOURCE_HEADERS)
+            for item in (
+                *SOURCE_HEADERS,
+                *OPTIONAL_SOURCE_HEADERS,
+                *KNOWN_UNUSED_SOURCE_HEADERS,
+            )
         }
         return tuple(
             item for item in self.headers if _normalize_header(item) not in known
@@ -451,6 +570,7 @@ def parse_listing_export(data: bytes) -> ParsedListingExport:
 
     parsed_rows: list[ListingRow] = []
     skipped_rows: list[str] = []
+    data_warnings: list[str] = []
     msku_counts: dict[str, int] = {}
 
     def source_value(values: list[Any], header: str) -> Any:
@@ -488,13 +608,28 @@ def parse_listing_export(data: bytes) -> ParsedListingExport:
             sales_7d = _number(
                 source_value(values, "7日销量"), "7日销量", row_number
             )
+            sales_14d = _number(
+                source_value(values, "14日销量"), "14日销量", row_number
+            )
             sales_30d = _number(
                 source_value(values, "30日销量"), "30日销量", row_number
             )
+            source_warning = sales_window_warning(
+                sales_7d,
+                sales_14d,
+                sales_30d,
+            )
+            if source_warning:
+                data_warnings.append(
+                    f"第{row_number}行 {msku}：{source_warning}，共享表将标记数据异常"
+                )
             row = ListingRow(
                 source_row=row_number,
                 msku=msku,
                 asin=_clean_text(source_value(values, "ASIN")).upper(),
+                price=_number(
+                    source_value(values, "价格"), "价格", row_number
+                ),
                 rating=_number(source_value(values, "评分"), "评分", row_number),
                 review_count=_number(
                     source_value(values, "Rating总数"), "Rating总数", row_number
@@ -502,19 +637,33 @@ def parse_listing_export(data: bytes) -> ParsedListingExport:
                 yesterday_ad_spend=_number(
                     source_value(values, "昨日广告费"), "昨日广告费", row_number
                 ),
+                ad_spend_7d=_number(
+                    source_value(values, "7日广告费"), "7日广告费", row_number
+                ),
+                ad_spend_14d=_number(
+                    source_value(values, "14日广告费"), "14日广告费", row_number
+                ),
+                ad_spend_30d=_number(
+                    source_value(values, "30日广告费"), "30日广告费", row_number
+                ),
                 fba_available=_number(
                     source_value(values, "FBA可售"), "FBA可售", row_number
                 ),
                 reserved=_sum_optional(fba_waiting, fba_reserved),
                 inbound=_sum_optional(planned, shipped),
                 sales_7d=sales_7d,
-                sales_14d=_number(
-                    source_value(values, "14日销量"), "14日销量", row_number
-                ),
+                sales_14d=sales_14d,
                 sales_30d=sales_30d,
-                system_monthly_sales=calculate_system_monthly_sales(
-                    sales_7d, sales_30d
+                revenue_7d=_number(
+                    source_value(values, "7日销售额"), "7日销售额", row_number
                 ),
+                revenue_14d=_number(
+                    source_value(values, "14日销售额"), "14日销售额", row_number
+                ),
+                revenue_30d=_number(
+                    source_value(values, "30日销售额"), "30日销售额", row_number
+                ),
+                source_warning=source_warning,
                 discount_price=(
                     _number(
                         optional_source_value(values, "优惠价"),
@@ -551,6 +700,7 @@ def parse_listing_export(data: bytes) -> ParsedListingExport:
         rows=unique_rows,
         duplicate_mskus=tuple(duplicate_mskus),
         skipped_rows=tuple(skipped_rows),
+        data_warnings=tuple(data_warnings),
     )
 
 
@@ -567,6 +717,9 @@ class ListingAirScriptBinding:
     sheet_name: str
     header_row: int
     columns: dict[str, str]
+    rule_version: str = ""
+    configured_formula_rows: int = 0
+    manual_override_rows: int = 0
 
 
 @dataclass
@@ -747,8 +900,8 @@ class ListingAirScriptClient:
             )
         return result
 
-    def validate(self) -> ListingAirScriptBinding:
-        result = self._execute("validate", [])
+    @staticmethod
+    def _binding_from_result(result: dict[str, Any]) -> ListingAirScriptBinding:
         columns = result.get("columns")
         if not isinstance(columns, dict):
             raise ResponseError("Listing AirScript验证结果缺少列信息")
@@ -761,11 +914,31 @@ class ListingAirScriptClient:
             raise ResponseError(
                 "Listing AirScript未识别完整共享表表头，请更新脚本和表头"
             )
+        rules = result.get("rules")
+        if not isinstance(rules, dict) or rules.get("valid") is not True:
+            raise ResponseError(
+                "Listing规则配置无效，请先初始化或修正规则配置工作表"
+            )
+        try:
+            formula_rows = int(result.get("formulaRows") or 0)
+            manual_rows = int(result.get("manualOverrideRows") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ResponseError("Listing AirScript返回的公式行统计无效") from exc
         return ListingAirScriptBinding(
             sheet_name=sheet_name,
             header_row=header_row,
             columns={str(key): str(value) for key, value in columns.items()},
+            rule_version=str(rules.get("version") or "").strip(),
+            configured_formula_rows=formula_rows,
+            manual_override_rows=manual_rows,
         )
+
+    def validate(self) -> ListingAirScriptBinding:
+        return self._binding_from_result(self._execute("validate", []))
+
+    def setup_rules(self) -> ListingAirScriptBinding:
+        """显式初始化规则配置表和缺失公式；AirScript保证不覆盖人工数字。"""
+        return self._binding_from_result(self._execute("setup_rules", []))
 
     def discover_sheets(self) -> list[dict[str, str]]:
         result = self._execute("discover", [])
@@ -869,6 +1042,7 @@ class ListingAirScriptClient:
         rows: tuple[ListingRow, ...],
         data_date: str,
         preconditions: list[dict[str, Any]] | None = None,
+        expected_rule_version: str = "",
     ) -> ListingSyncSummary:
         data_date = validate_listing_data_date(data_date)
         summary = ListingSyncSummary()
@@ -886,7 +1060,10 @@ class ListingAirScriptClient:
                     "sync",
                     batch,
                     data_date,
-                    {"preconditions": batch_preconditions},
+                    {
+                        "preconditions": batch_preconditions,
+                        "expected_rule_version": expected_rule_version,
+                    },
                 )
             except (
                 NetworkError,
@@ -926,6 +1103,7 @@ class PendingListingImport:
     data_date: str
     filename: str
     parsed: ParsedListingExport
+    rule_version: str
     created_at: float
 
 
@@ -942,6 +1120,7 @@ class ListingPreviewRegistry:
         data_date: str,
         filename: str,
         parsed: ParsedListingExport,
+        rule_version: str,
     ) -> str:
         token = secrets.token_urlsafe(24)
         now = time.monotonic()
@@ -952,6 +1131,7 @@ class ListingPreviewRegistry:
             data_date,
             filename,
             parsed,
+            rule_version,
             now,
         )
         with self._lock:

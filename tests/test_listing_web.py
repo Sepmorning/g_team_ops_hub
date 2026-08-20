@@ -76,16 +76,22 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
                     source_row=2,
                     msku="SKU-1",
                     asin="B012345678",
+                    price=19.99,
                     rating=4.4,
                     review_count=123,
                     yesterday_ad_spend=2.5,
+                    ad_spend_7d=12.5,
+                    ad_spend_14d=24.5,
+                    ad_spend_30d=48.5,
                     fba_available=20,
                     reserved=5,
                     inbound=9,
                     sales_7d=7,
                     sales_14d=15,
                     sales_30d=31,
-                    system_monthly_sales=30,
+                    revenue_7d=140,
+                    revenue_14d=300,
+                    revenue_30d=620,
                 ),
             ),
         )
@@ -99,6 +105,19 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
                 "纯粹-美国",
                 2,
                 {header: "A" for header in TARGET_HEADERS},
+                rule_version="R1.0",
+                configured_formula_rows=1,
+            ),
+        )
+        monkeypatch.setattr(
+            "g_team_ops.modules.inventory.router.ListingAirScriptClient.setup_rules",
+            lambda _self: ListingAirScriptBinding(
+                "纯粹-美国",
+                2,
+                {header: "A" for header in TARGET_HEADERS},
+                rule_version="R1.0",
+                configured_formula_rows=1,
+                manual_override_rows=1,
             ),
         )
         sync_calls = {}
@@ -109,12 +128,16 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
             "matchHeader": "MSKU",
             "matchValue": "SKU-1",
             "itemKey": "SKU-1",
-            "field": "rating",
+            "field": "rating_review",
             "cellAddress": "H3",
-            "value": 4.3,
-            "comparableValue": "4.3",
+            "value": "4.3/120",
+            "comparableValue": "4.3/120",
         }]
-        after = [{**before[0], "value": 4.4, "comparableValue": "4.4"}]
+        after = [{
+            **before[0],
+            "value": "4.4/123",
+            "comparableValue": "4.4/123",
+        }]
         monkeypatch.setattr(
             "g_team_ops.modules.inventory.router.ListingAirScriptClient.snapshot_rows",
             lambda _self, _rows: before,
@@ -124,9 +147,16 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
             lambda _self, _targets: after,
         )
 
-        def fake_sync(_self, rows, data_date, preconditions=None):
+        def fake_sync(
+            _self,
+            rows,
+            data_date,
+            preconditions=None,
+            expected_rule_version="",
+        ):
             sync_calls.update(rows=rows, data_date=data_date)
             assert preconditions == before
+            assert expected_rule_version == "R1.0"
             return ListingSyncSummary(updated=["SKU-1"])
 
         monkeypatch.setattr(
@@ -141,6 +171,15 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
         assert config.status_code == 200
         assert config.json()["countries"][0]["sheet_name"] == "纯粹-美国"
         assert "listing-token" not in config.text
+
+        rules = client.post(
+            f"/api/inventory/countries/{country.id}/rules/setup",
+            headers={"X-CSRF-Token": csrf},
+            json={"shop_id": shop.id},
+        )
+        assert rules.status_code == 200
+        assert "R1.0" in rules.json()["message"]
+        assert "保留人工最终月销 1 行" in rules.json()["message"]
 
         preview = client.post(
             "/api/inventory/imports/preview",
@@ -161,6 +200,8 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
         assert preview.status_code == 200
         assert preview.json()["row_count"] == 1
         assert preview.json()["sample"][0]["review_count"] == 123
+        assert preview.json()["sample"][0]["rating_review"] == "4.4/123"
+        assert preview.json()["rules"]["version"] == "R1.0"
 
         applied = client.post(
             "/api/inventory/imports/apply",

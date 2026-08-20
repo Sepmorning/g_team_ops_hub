@@ -65,7 +65,7 @@ class FakeSheet {
     _cell(row, column) {
         const key = row + ":" + column;
         if (!this._cells.has(key)) {
-            this._cells.set(key, { value: "", numberFormat: "" });
+            this._cells.set(key, { value: "", formula: "", numberFormat: "" });
         }
         return this._cells.get(key);
     }
@@ -73,6 +73,11 @@ class FakeSheet {
     value(header, headers) {
         const column = headers.indexOf(header) + 1;
         return column > 0 ? this._cell(2, column).value : undefined;
+    }
+
+    formula(header, headers) {
+        const column = headers.indexOf(header) + 1;
+        return column > 0 ? this._cell(2, column).formula : undefined;
     }
 
     Range(address) {
@@ -98,11 +103,26 @@ class FakeSheet {
                             const sourceRow = Array.isArray(value[rowIndex])
                                 ? value[rowIndex] : [];
                             cell.value = sourceRow[columnIndex] ?? "";
+                            cell.formula = "";
                         });
                     });
                 } else {
-                    flattened.forEach(cell => { cell.value = value; });
+                    flattened.forEach(cell => {
+                        cell.value = value;
+                        cell.formula = "";
+                    });
                 }
+            }
+        });
+        Object.defineProperty(range, "Formula", {
+            get() {
+                return cells.map(row => row.map(cell => cell.formula || cell.value));
+            },
+            set(value) {
+                flattened.forEach(cell => {
+                    cell.formula = value;
+                    cell.value = "";
+                });
             }
         });
         Object.defineProperty(range, "NumberFormat", {
@@ -110,6 +130,21 @@ class FakeSheet {
         });
         return range;
     }
+}
+
+function validRuleSheet() {
+    const sheet = new FakeSheet("规则配置", []);
+    const values = {
+        B4: "R1.0", B5: 10, B6: 30, B7: 90, B8: 10,
+        B9: 0.20, B10: 0.50, B11: -0.20, B12: -0.50, B13: 0.25,
+        B17: 0.30, C17: 0.25, D17: 0.45,
+        B18: 0.40, C18: 0.30, D18: 0.30,
+        B19: 0.50, C19: 0.30, D19: 0.20
+    };
+    Object.entries(values).forEach(([address, value]) => {
+        sheet.Range(address).Value2 = value;
+    });
+    return sheet;
 }
 
 function targetRows(headers) {
@@ -121,11 +156,17 @@ function targetRows(headers) {
     return [headers, row];
 }
 
-function executeWith(sheet, argv) {
+function executeWith(sheet, argv, ruleSheet) {
+    const sheets = [sheet, ruleSheet || validRuleSheet()];
     const Application = {
         Sheets: {
-            Count: 1,
-            Item() { return sheet; }
+            get Count() { return sheets.length; },
+            Item(index) { return sheets[index - 1]; },
+            Add() {
+                const created = new FakeSheet("Sheet" + (sheets.length + 1), []);
+                sheets.push(created);
+                return created;
+            }
         }
     };
     const runner = new Function("Application", "Context", source);
@@ -167,6 +208,51 @@ const missingTarget = execute(requiredOnlySheet, {
     asin: "B012345678",
     discount_price: 12.99
 });
+
+const manualSheet = new FakeSheet("纯粹-美国", targetRows(requiredHeaders));
+manualSheet._cell(2, requiredHeaders.indexOf("最终补货月销") + 1).value = 55;
+const manualResult = execute(manualSheet, {
+    msku: "SKU-1",
+    asin: "B012345678",
+    price: 20.99,
+    sales_7d: 7,
+    sales_14d: 15,
+    sales_30d: 31,
+    ad_spend_7d: 10,
+    ad_spend_14d: 20,
+    ad_spend_30d: 40,
+    revenue_7d: 140,
+    revenue_14d: 300,
+    revenue_30d: 620
+});
+const setupSheet = new FakeSheet("纯粹-美国", targetRows(requiredHeaders));
+const setupResult = executeWith(setupSheet, {
+    action: "setup_rules",
+    sheet_name: "纯粹-美国",
+    items: []
+});
+let versionConflict = "";
+try {
+    executeWith(manualSheet, {
+        action: "sync",
+        sheet_name: "纯粹-美国",
+        data_date: "2026-08-07",
+        expected_rule_version: "R0.9",
+        items: [{ msku: "SKU-1", asin: "B012345678" }]
+    });
+} catch (error) {
+    versionConflict = String(error.message || error);
+}
+const recoveryWithoutRules = executeWith(
+    new FakeSheet("纯粹-美国", targetRows(requiredHeaders)),
+    {
+        action: "snapshot_targets",
+        sheet_name: "纯粹-美国",
+        items: [],
+        targets: []
+    },
+    new FakeSheet("规则配置", [])
+);
 
 const recoverySheet = new FakeSheet("纯粹-美国", targetRows(optionalHeaders));
 const recoveryItem = {
@@ -237,6 +323,12 @@ console.log(JSON.stringify({
     priceAfterWrite,
     priceAfterBlank,
     regularPrice: requiredOnlySheet.value("价格", requiredHeaders),
+    manualResult,
+    manualFinal: manualSheet.value("最终补货月销", requiredHeaders),
+    systemFormula: manualSheet.formula("系统建议月销", requiredHeaders),
+    setupResult,
+    versionConflict,
+    recoveryWithoutRules,
     recoverySync,
     recoveryChangeCount: recoveryChanges.length,
     recoveryPreview,
@@ -260,13 +352,23 @@ console.log(JSON.stringify({
     )
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
 
-    assert payload["priced"]["schemaVersion"] == 4
+    assert payload["priced"]["schemaVersion"] == 5
     assert payload["priceAfterWrite"] == 15.99
     assert payload["priceAfterBlank"] == ""
     assert payload["priced"]["columns"]["discount_price"] == "D"
     assert "discount_price" not in payload["missingTarget"]["columns"]
     assert payload["regularPrice"] == 19.99
     assert payload["blanked"]["failures"] == []
+    assert payload["priced"]["rules"]["version"] == "R1.0"
+    assert payload["manualResult"]["manualOverrideRows"] == 1
+    assert payload["manualFinal"] == 55
+    assert payload["systemFormula"].startswith("=IF(")
+    assert "'规则配置'!$B$17" in payload["systemFormula"]
+    assert "'规则配置'!$D$19" in payload["systemFormula"]
+    assert payload["setupResult"]["formulaRows"] == 1
+    assert "规则版本在预览后发生变化" in payload["versionConflict"]
+    assert payload["recoveryWithoutRules"]["success"] is True
+    assert payload["recoveryWithoutRules"]["rules"]["valid"] is False
     assert payload["recoverySync"]["updated"] == ["SKU-1"]
     assert payload["recoveryChangeCount"] >= 2
     assert len(payload["recoveryPreview"]["ready"]) == payload["recoveryChangeCount"]
