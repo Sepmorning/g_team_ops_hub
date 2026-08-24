@@ -36,7 +36,7 @@ MAX_XLSX_ENTRIES = 2_000
 MAX_LISTING_ROWS = 20_000
 LISTING_WRITE_BATCH_SIZE = 50
 LISTING_PREVIEW_TTL_SECONDS = 20 * 60
-REQUIRED_LISTING_SCRIPT_VERSION = 5
+REQUIRED_LISTING_SCRIPT_VERSION = 10
 
 SOURCE_HEADERS = (
     "MSKU",
@@ -169,11 +169,10 @@ TARGET_HEADERS = (
     "链接状态",
     "库存状态",
     "广告状态",
-    "运营备注",
     "本次更新时间",
 )
 
-OPTIONAL_TARGET_HEADERS = ("优惠价",)
+OPTIONAL_TARGET_HEADERS = ("优惠价", "运营备注")
 
 _SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _RELATIONSHIP_NS = (
@@ -720,6 +719,10 @@ class ListingAirScriptBinding:
     rule_version: str = ""
     configured_formula_rows: int = 0
     manual_override_rows: int = 0
+    formula_error_rows: int = 0
+    rule_sheet_protected: bool = False
+    low_confidence_highlight_applied: bool = False
+    archived_rule_sheet_name: str = ""
 
 
 @dataclass
@@ -922,8 +925,14 @@ class ListingAirScriptClient:
         try:
             formula_rows = int(result.get("formulaRows") or 0)
             manual_rows = int(result.get("manualOverrideRows") or 0)
+            formula_error_rows = int(result.get("formulaErrorRows") or 0)
         except (TypeError, ValueError) as exc:
             raise ResponseError("Listing AirScript返回的公式行统计无效") from exc
+        if formula_error_rows > 0:
+            raise ResponseError(
+                f"Listing共享表有 {formula_error_rows} 行公式计算错误；"
+                "请替换最新AirScript并点击“初始化 / 检查规则配置”后重试"
+            )
         return ListingAirScriptBinding(
             sheet_name=sheet_name,
             header_row=header_row,
@@ -931,13 +940,21 @@ class ListingAirScriptClient:
             rule_version=str(rules.get("version") or "").strip(),
             configured_formula_rows=formula_rows,
             manual_override_rows=manual_rows,
+            formula_error_rows=formula_error_rows,
+            rule_sheet_protected=bool(rules.get("protected")),
+            low_confidence_highlight_applied=bool(
+                result.get("lowConfidenceHighlightApplied")
+            ),
+            archived_rule_sheet_name=str(
+                result.get("archivedRuleSheetName") or ""
+            ).strip(),
         )
 
     def validate(self) -> ListingAirScriptBinding:
         return self._binding_from_result(self._execute("validate", []))
 
     def setup_rules(self) -> ListingAirScriptBinding:
-        """显式初始化规则配置表和缺失公式；AirScript保证不覆盖人工数字。"""
+        """显式恢复默认规则、详细说明、标准公式和低可信度提示色。"""
         return self._binding_from_result(self._execute("setup_rules", []))
 
     def discover_sheets(self) -> list[dict[str, str]]:

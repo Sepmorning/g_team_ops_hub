@@ -43,7 +43,7 @@
       <div id="connectionHint" class="status show info" style="margin:0">正在读取店铺配置…</div>
       <div class="actions" style="margin-top:10px">
         <button class="btn" type="button" onclick="setupListingRules(this)">初始化 / 检查规则配置</button>
-        <span class="muted">只补齐“规则配置”工作表和标准公式，保留人工最终月销。</span>
+        <span class="muted">恢复“ListingRules”系统默认参数、逐项规则说明和标准公式；规则表保持未保护，可直接编辑。自定义规则与人工最终月销会被重置。</span>
       </div>
     </div>
   </div>
@@ -143,7 +143,7 @@ async function validateSelectedSite(){
 
 async function setupListingRules(button){
   if(!shopSelect.value||!countrySelect.value){showInventory('请先选择店铺和国家站点','error');return}
-  if(!confirm('确认初始化或检查“规则配置”工作表，并为缺失的计算单元格补齐标准公式？人工填写的最终补货月销不会被覆盖。'))return;
+  if(!confirm('确认恢复“ListingRules”系统默认规则并重新安装标准公式？旧“规则配置”会自动迁移；自定义规则参数和人工填写的最终补货月销都会被重置。'))return;
   GTeam.buttonBusy(button,true,'正在初始化…');
   try{
     const data=await GTeam.api(`/api/inventory/countries/${countrySelect.value}/rules/setup`,{method:'POST',body:{shop_id:shopSelect.value}});
@@ -169,7 +169,7 @@ async function previewListing(button){
     if(data.skipped_rows.length)warnings.push(`无效行已跳过：${data.skipped_rows.join('；')}`);
     if(data.data_warnings.length)warnings.push(`销量窗口异常：${data.data_warnings.join('；')}`);
     if(data.ignored_headers.length)warnings.push(`已忽略新增列：${data.ignored_headers.join('、')}`);
-    if(data.rules?.version)warnings.push(`共享表规则版本 ${data.rules.version}；公式行 ${data.rules.formula_rows}；人工最终月销 ${data.rules.manual_override_rows} 行`);
+    if(data.rules?.version)warnings.push(`共享表规则版本 ${data.rules.version}；公式行 ${data.rules.formula_rows}；公式错误 ${data.rules.formula_error_rows||0} 行；下次回填将重置人工最终月销 ${data.rules.manual_override_rows} 行`);
     if(data.discount_price?.will_update)warnings.push('两份表均已识别“优惠价”，本次将同步；领星空值会清除共享表旧优惠价');
     else if(data.discount_price?.source_present)warnings.push('领星文件有“优惠价”，但共享表没有该列，本次已忽略优惠价');
     else if(data.discount_price?.target_present)warnings.push('共享表有“优惠价”，但领星文件没有该列，本次不会修改原优惠价');

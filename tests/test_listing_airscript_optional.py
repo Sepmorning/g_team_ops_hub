@@ -54,6 +54,10 @@ class FakeSheet {
     constructor(name, rows) {
         this.Name = name;
         this._cells = new Map();
+        this._conditionalFormats = [];
+        this.ProtectContents = false;
+        this.ThrowWhenUnprotected = false;
+        this.UnprotectMode = "normal";
         rows.forEach((values, rowIndex) => {
             values.forEach((value, columnIndex) => {
                 this._cell(rowIndex + 1, columnIndex + 1).value = value;
@@ -62,10 +66,29 @@ class FakeSheet {
         this.UsedRange = { Row: 1, Rows: { Count: rows.length } };
     }
 
+    Protect() { this.ProtectContents = true; }
+
+    Unprotect(value) {
+        if (this.ThrowWhenUnprotected && !this.ProtectContents) {
+            throw new Error("WPS rejects Unprotect on an unprotected sheet");
+        }
+        if (this.UnprotectMode === "never") {
+            throw new Error("KDocs refuses every Unprotect signature");
+        }
+        if (this.UnprotectMode === "object" && (
+            !value || typeof value !== "object" || value.Password !== ""
+        )) {
+            throw new Error("KDocs requires an object password argument");
+        }
+        this.ProtectContents = false;
+    }
+
     _cell(row, column) {
         const key = row + ":" + column;
         if (!this._cells.has(key)) {
-            this._cells.set(key, { value: "", formula: "", numberFormat: "" });
+            this._cells.set(key, {
+                value: "", formula: "", numberFormat: "", locked: true
+            });
         }
         return this._cells.get(key);
     }
@@ -78,6 +101,11 @@ class FakeSheet {
     formula(header, headers) {
         const column = headers.indexOf(header) + 1;
         return column > 0 ? this._cell(2, column).formula : undefined;
+    }
+
+    numberFormat(header, headers) {
+        const column = headers.indexOf(header) + 1;
+        return column > 0 ? this._cell(2, column).numberFormat : undefined;
     }
 
     Range(address) {
@@ -128,15 +156,42 @@ class FakeSheet {
         Object.defineProperty(range, "NumberFormat", {
             set(value) { flattened.forEach(cell => { cell.numberFormat = value; }); }
         });
+        Object.defineProperty(range, "Locked", {
+            get() {
+                const values = flattened.map(cell => cell.locked);
+                return values.every(value => value === values[0]) ? values[0] : null;
+            },
+            set(value) { flattened.forEach(cell => { cell.locked = Boolean(value); }); }
+        });
+        range.FormatConditions = {
+            get Count() { return this._owner._conditionalFormats.length; },
+            _owner: this,
+            Item(index) { return this._owner._conditionalFormats[index - 1]; },
+            Add(type, operator, formula1, formula2) {
+                const condition = {
+                    Type: type,
+                    Operator: operator,
+                    Formula1: formula1,
+                    Formula2: formula2,
+                    Interior: { Color: 0 },
+                    AppliesTo: range,
+                    ModifyAppliesToRange(value) { this.AppliesTo = value; },
+                    SetFirstPriority() { this.Priority = 1; }
+                };
+                this._owner._conditionalFormats.push(condition);
+                return condition;
+            }
+        };
         return range;
     }
 }
 
-function validRuleSheet() {
-    const sheet = new FakeSheet("规则配置", []);
+function validRuleSheet(name = "ListingRules") {
+    const sheet = new FakeSheet(name, []);
     const values = {
         B4: "R1.0", B5: 10, B6: 30, B7: 90, B8: 10,
         B9: 0.20, B10: 0.50, B11: -0.20, B12: -0.50, B13: 0.25,
+        B14: 5,
         B17: 0.30, C17: 0.25, D17: 0.45,
         B18: 0.40, C18: 0.30, D18: 0.30,
         B19: 0.50, C19: 0.30, D19: 0.20
@@ -158,6 +213,7 @@ function targetRows(headers) {
 
 function executeWith(sheet, argv, ruleSheet) {
     const sheets = [sheet, ruleSheet || validRuleSheet()];
+    globalThis.__lastListingSheets = sheets;
     const Application = {
         Sheets: {
             get Count() { return sheets.length; },
@@ -189,9 +245,12 @@ const optionalSheet = new FakeSheet("纯粹-美国", targetRows(optionalHeaders)
 const priced = execute(optionalSheet, {
     msku: "SKU-1",
     asin: "B012345678",
-    discount_price: 15.99
+    discount_price: 15.99,
+    rating_review: "5/4"
 });
 const priceAfterWrite = optionalSheet.value("优惠价", optionalHeaders);
+const ratingAfterWrite = optionalSheet.value("评分/评论数", optionalHeaders);
+const ratingNumberFormat = optionalSheet.numberFormat("评分/评论数", optionalHeaders);
 const blanked = execute(optionalSheet, {
     msku: "SKU-1",
     asin: "B012345678",
@@ -211,6 +270,11 @@ const missingTarget = execute(requiredOnlySheet, {
 
 const manualSheet = new FakeSheet("纯粹-美国", targetRows(requiredHeaders));
 manualSheet._cell(2, requiredHeaders.indexOf("最终补货月销") + 1).value = 55;
+const legacyFinalColumn = columnName(requiredHeaders.indexOf("最终补货月销") + 1);
+const legacyConfidenceColumn = columnName(requiredHeaders.indexOf("预测可信度") + 1);
+manualSheet.Range(legacyFinalColumn + "2").FormatConditions.Add(
+    2, -1, "=$" + legacyConfidenceColumn + "2=\"中\"", ""
+);
 const manualResult = execute(manualSheet, {
     msku: "SKU-1",
     asin: "B012345678",
@@ -225,12 +289,37 @@ const manualResult = execute(manualSheet, {
     revenue_14d: 300,
     revenue_30d: 620
 });
+const manualFinalFormula = manualSheet.formula("最终补货月销", requiredHeaders);
+const trendFormula = manualSheet.formula("趋势差异率", requiredHeaders);
+const confidenceFormula = manualSheet.formula("预测可信度", requiredHeaders);
+const exceptionFormula = manualSheet.formula("异常原因", requiredHeaders);
+const finalFormula = manualSheet.formula("最终补货月销", requiredHeaders);
+const linkStatusCell = columnName(requiredHeaders.indexOf("链接状态") + 1) + "2";
+const confidenceCell = columnName(requiredHeaders.indexOf("预测可信度") + 1) + "2";
+const highlightCondition = manualSheet._conditionalFormats[0];
 const setupSheet = new FakeSheet("纯粹-美国", targetRows(requiredHeaders));
+const legacyRuleSheet = validRuleSheet("规则配置");
+legacyRuleSheet.Range("B5").Value2 = 11;
+// 模拟金山文档在线接口只接受对象密码参数的情况。
+legacyRuleSheet.ProtectContents = true;
+legacyRuleSheet.UnprotectMode = "object";
 const setupResult = executeWith(setupSheet, {
     action: "setup_rules",
     sheet_name: "纯粹-美国",
     items: []
-});
+}, legacyRuleSheet);
+const lockedSetupSheet = new FakeSheet("锁定测试-美国", targetRows(requiredHeaders));
+const lockedRuleSheet = validRuleSheet("ListingRules");
+lockedRuleSheet.ProtectContents = true;
+lockedRuleSheet.UnprotectMode = "never";
+const lockedSetupResult = executeWith(lockedSetupSheet, {
+    action: "setup_rules",
+    sheet_name: "锁定测试-美国",
+    items: []
+}, lockedRuleSheet);
+const replacementRuleSheet = globalThis.__lastListingSheets.find(
+    sheet => sheet.Name === "ListingRules"
+);
 let versionConflict = "";
 try {
     executeWith(manualSheet, {
@@ -322,11 +411,35 @@ console.log(JSON.stringify({
     missingTarget,
     priceAfterWrite,
     priceAfterBlank,
+    ratingAfterWrite,
+    ratingNumberFormat,
     regularPrice: requiredOnlySheet.value("价格", requiredHeaders),
     manualResult,
     manualFinal: manualSheet.value("最终补货月销", requiredHeaders),
+    manualFinalFormula,
+    trendFormula,
     systemFormula: manualSheet.formula("系统建议月销", requiredHeaders),
+    replenishmentFormula: manualSheet.formula("建议补货量", requiredHeaders),
+    confidenceFormula,
+    exceptionFormula,
+    finalFormula,
+    linkStatusCell,
+    confidenceCell,
+    highlightFormula: highlightCondition ? highlightCondition.Formula1 : "",
+    highlightColor: highlightCondition ? highlightCondition.Interior.Color : 0,
     setupResult,
+    migratedRuleSheetName: legacyRuleSheet.Name,
+    resetLowBoundary: legacyRuleSheet.Range("B5").Value2[0][0],
+    ruleSheetProtected: legacyRuleSheet.ProtectContents,
+    ruleTitleLocked: legacyRuleSheet.Range("A1").Locked,
+    ruleParameterLocked: legacyRuleSheet.Range("B4").Locked,
+    ruleWeightLocked: legacyRuleSheet.Range("B17").Locked,
+    confidenceDocumentation: legacyRuleSheet.Range("A36:D38").Value2,
+    protectionDocumentation: legacyRuleSheet.Range("A71:D71").Value2,
+    lockedSetupResult,
+    archivedLockedRuleSheetName: lockedRuleSheet.Name,
+    replacementRuleSheetProtected: replacementRuleSheet.ProtectContents,
+    replacementLowBoundary: replacementRuleSheet.Range("B5").Value2[0][0],
     versionConflict,
     recoveryWithoutRules,
     recoverySync,
@@ -352,20 +465,59 @@ console.log(JSON.stringify({
     )
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
 
-    assert payload["priced"]["schemaVersion"] == 5
+    assert payload["priced"]["schemaVersion"] == 10
     assert payload["priceAfterWrite"] == 15.99
     assert payload["priceAfterBlank"] == ""
+    assert payload["ratingAfterWrite"] == "5/4"
+    assert payload["ratingNumberFormat"] == "@"
     assert payload["priced"]["columns"]["discount_price"] == "D"
     assert "discount_price" not in payload["missingTarget"]["columns"]
     assert payload["regularPrice"] == 19.99
     assert payload["blanked"]["failures"] == []
     assert payload["priced"]["rules"]["version"] == "R1.0"
-    assert payload["manualResult"]["manualOverrideRows"] == 1
-    assert payload["manualFinal"] == 55
+    assert payload["priced"]["rules"]["replenishmentMultiple"] == 5
+    assert payload["priced"]["formulaErrorRows"] == 0
+    assert payload["manualResult"]["manualOverrideRows"] == 0
+    assert payload["manualFinal"] == ""
+    assert payload["manualFinalFormula"].startswith("=IF(")
     assert payload["systemFormula"].startswith("=IF(")
-    assert "'规则配置'!$B$17" in payload["systemFormula"]
-    assert "'规则配置'!$D$19" in payload["systemFormula"]
+    assert "'ListingRules'!$B$17" in payload["systemFormula"]
+    assert "'ListingRules'!$D$19" in payload["systemFormula"]
+    assert "ROUNDUP(MAX(0," in payload["replenishmentFormula"]
+    assert "'ListingRules'!$B$14" in payload["replenishmentFormula"]
+    assert "INT(" not in payload["replenishmentFormula"]
+    assert payload["linkStatusCell"] not in payload["confidenceFormula"]
+    assert payload["linkStatusCell"] not in payload["exceptionFormula"]
+    assert '="数据不足"' in payload["confidenceFormula"]
+    assert "(V2/7*30)" in payload["trendFormula"]
+    assert "((X2-W2)/16*30)" in payload["trendFormula"]
+    assert payload["confidenceCell"] not in payload["finalFormula"]
+    assert '="清库存"' in payload["finalFormula"]
+    assert '="停售"' in payload["finalFormula"]
+    assert '="新品观察"' in payload["finalFormula"]
+    assert '="暂缓补货"' in payload["finalFormula"]
+    assert payload["highlightFormula"].endswith('="低"')
+    assert payload["highlightColor"] == 15123357
     assert payload["setupResult"]["formulaRows"] == 1
+    assert payload["setupResult"]["formulaErrorRows"] == 0
+    assert payload["setupResult"]["lowConfidenceHighlightApplied"] is True
+    assert payload["setupResult"]["rules"]["protected"] is False
+    assert payload["setupResult"]["rules"]["protectionVerified"] is True
+    assert payload["setupResult"]["rules"]["editableRangesApplied"] is False
+    assert payload["migratedRuleSheetName"] == "ListingRules"
+    assert payload["resetLowBoundary"] == 10
+    assert payload["ruleSheetProtected"] is False
+    assert [row[1] for row in payload["confidenceDocumentation"]] == ["低", "中", "高"]
+    assert "FBA可售=0" in payload["confidenceDocumentation"][0][2]
+    assert "广告状态=数据不足" in payload["confidenceDocumentation"][1][2]
+    assert "同时满足" in payload["confidenceDocumentation"][2][2]
+    assert payload["protectionDocumentation"][0][1] == "不设置保护"
+    assert payload["lockedSetupResult"]["archivedRuleSheetName"].startswith(
+        "ListingRules_旧保护"
+    )
+    assert payload["archivedLockedRuleSheetName"].startswith("ListingRules_旧保护")
+    assert payload["replacementRuleSheetProtected"] is False
+    assert payload["replacementLowBoundary"] == 10
     assert "规则版本在预览后发生变化" in payload["versionConflict"]
     assert payload["recoveryWithoutRules"]["success"] is True
     assert payload["recoveryWithoutRules"]["rules"]["valid"] is False

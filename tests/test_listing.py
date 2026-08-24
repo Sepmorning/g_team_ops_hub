@@ -4,9 +4,11 @@ import zipfile
 
 import pytest
 
-from g_team_ops.errors import ConfigurationError
+from g_team_ops.errors import ConfigurationError, ResponseError
 from g_team_ops.listing import (
+    ListingAirScriptClient,
     SOURCE_HEADERS,
+    TARGET_HEADERS,
     infer_listing_data_date,
     parse_listing_export,
 )
@@ -272,3 +274,18 @@ def test_blank_sales_window_clears_stale_metric_and_marks_data_incomplete():
 
 def test_filename_date_rule():
     assert infer_listing_data_date("Listing20260726-939972.xlsx") == "2026-07-26"
+
+
+def test_listing_binding_rejects_formula_errors_before_import():
+    with pytest.raises(ResponseError, match="公式计算错误"):
+        ListingAirScriptClient._binding_from_result(
+            {
+                "sheetName": "纯粹-美国",
+                "headerRow": 1,
+                "columns": {header: "A" for header in TARGET_HEADERS},
+                "rules": {"valid": True, "version": "R1.0"},
+                "formulaRows": 32,
+                "manualOverrideRows": 0,
+                "formulaErrorRows": 32,
+            }
+        )

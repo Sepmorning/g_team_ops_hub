@@ -118,6 +118,9 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
                 rule_version="R1.0",
                 configured_formula_rows=1,
                 manual_override_rows=1,
+                rule_sheet_protected=False,
+                low_confidence_highlight_applied=True,
+                archived_rule_sheet_name="ListingRules_旧保护",
             ),
         )
         sync_calls = {}
@@ -179,7 +182,10 @@ def test_listing_preview_and_apply_are_scoped_to_selected_shop_country(
         )
         assert rules.status_code == 200
         assert "R1.0" in rules.json()["message"]
-        assert "保留人工最终月销 1 行" in rules.json()["message"]
+        assert "默认规则与标准公式已恢复" in rules.json()["message"]
+        assert "规则表保持未保护，可直接编辑" in rules.json()["message"]
+        assert "旧受保护规则表已保留为 ListingRules_旧保护" in rules.json()["message"]
+        assert "低可信度提示色已安装" in rules.json()["message"]
 
         preview = client.post(
             "/api/inventory/imports/preview",

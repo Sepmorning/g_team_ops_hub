@@ -119,7 +119,8 @@ def build_router(ctx: WebContext) -> APIRouter:
                 f"已按名称识别{len(binding.columns)}列；"
                 f"规则版本 {binding.rule_version}，"
                 f"公式行 {binding.configured_formula_rows}，"
-                f"人工月销 {binding.manual_override_rows} 行"
+                f"待更新重置人工月销 {binding.manual_override_rows} 行，"
+                f"公式错误 0 行"
             ),
         }
 
@@ -145,20 +146,37 @@ def build_router(ctx: WebContext) -> APIRouter:
         except (CarrierError, ConfigurationError) as exc:
             return json_error(exc.user_message)
         ctx.logger.info(
-            "listing_rules_setup user=%s shop=%s country=%s version=%s rows=%d manual=%d",
+            "listing_rules_setup user=%s shop=%s country=%s version=%s rows=%d "
+            "protected=%s highlight=%s",
             account.id,
             shop_id,
             country_id,
             binding.rule_version,
             binding.configured_formula_rows,
-            binding.manual_override_rows,
+            binding.rule_sheet_protected,
+            binding.low_confidence_highlight_applied,
+        )
+        protection_text = (
+            "规则表仍处于保护状态，请重新初始化或检查旧表"
+            if binding.rule_sheet_protected
+            else "规则表保持未保护，可直接编辑"
+        )
+        archive_text = (
+            f"；旧受保护规则表已保留为 {binding.archived_rule_sheet_name}"
+            if binding.archived_rule_sheet_name
+            else ""
+        )
+        highlight_text = (
+            "低可信度提示色已安装"
+            if binding.low_confidence_highlight_applied
+            else "低可信度提示色安装失败"
         )
         return {
             "ok": True,
             "message": (
-                f"{shop.name} / {country.country_name}：规则配置已就绪；"
+                f"{shop.name} / {country.country_name}：默认规则与标准公式已恢复；"
                 f"版本 {binding.rule_version}，公式行 {binding.configured_formula_rows}，"
-                f"保留人工最终月销 {binding.manual_override_rows} 行"
+                f"{protection_text}{archive_text}，{highlight_text}，公式错误 0 行"
             ),
         }
 
@@ -246,6 +264,8 @@ def build_router(ctx: WebContext) -> APIRouter:
                 "version": binding.rule_version,
                 "formula_rows": binding.configured_formula_rows,
                 "manual_override_rows": binding.manual_override_rows,
+                "formula_error_rows": binding.formula_error_rows,
+                "protected": binding.rule_sheet_protected,
             },
             "discount_price": {
                 "source_present": parsed.has_discount_price,

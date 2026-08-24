@@ -1,9 +1,12 @@
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 10;
 const HEADER_END_COLUMN = "CZ";
 const MAX_HEADER_ROW = 12;
 const MAX_SCAN_ROW = 20000;
 const MAX_ITEMS = 50;
-const RULE_SHEET_NAME = "规则配置";
+// WPS会把中文工作表名的跨表公式引用保存成无法识别的名称，导致#NAME?。
+// 标签使用ASCII，工作表内部标题仍保持中文；setup_rules会迁移版本5的旧标签。
+const RULE_SHEET_NAME = "ListingRules";
+const LEGACY_RULE_SHEET_NAME = "规则配置";
 
 // Listing脚本与物流脚本完全独立。所有列都按表头名称识别，顺序可以任意，
 // 也允许保留自定义列；同一标准字段出现两次时会停止，避免写错位置。
@@ -51,13 +54,13 @@ const FIELD_DEFINITIONS = {
     link_status: ["链接状态"],
     inventory_status: ["库存状态"],
     ad_status: ["广告状态"],
-    operation_notes: ["运营备注"],
     updated_at: ["本次更新时间"]
 };
 
 // 可选字段不参与完整表头校验；出现时仍要求名称唯一。
 const OPTIONAL_FIELD_DEFINITIONS = {
-    discount_price: ["优惠价"]
+    discount_price: ["优惠价"],
+    operation_notes: ["运营备注"]
 };
 
 const ROLL_FIELDS = [
@@ -480,6 +483,8 @@ function writeFields(sheet, columns, writesByField, states) {
             if (
                 field === "current_data_date" ||
                 field === "previous_data_date" ||
+                field === "rating_review" ||
+                field === "previous_rating_review" ||
                 field === "updated_at"
             ) {
                 range.NumberFormat = "@";
@@ -542,6 +547,18 @@ function ensureRuleSheet() {
     if (existing) {
         return existing;
     }
+    const legacy = findSheetByName(LEGACY_RULE_SHEET_NAME);
+    if (legacy) {
+        try {
+            legacy.Name = RULE_SHEET_NAME;
+            return legacy;
+        } catch (error) {
+            throw new Error(
+                "无法把旧“" + LEGACY_RULE_SHEET_NAME + "”工作表迁移为“" +
+                RULE_SHEET_NAME + "”，请确认工作簿结构未被保护后重试"
+            );
+        }
+    }
     let created = null;
     try {
         created = Application.Sheets.Add();
@@ -561,15 +578,101 @@ function ensureRuleSheet() {
     return created;
 }
 
-function writeRuleDefault(sheet, address, value) {
-    const range = sheet.Range(address);
-    if (displayText(scalarValue(range)) === "") {
-        range.Value2 = value;
+function writeRuleValue(sheet, address, value) {
+    sheet.Range(address).Value2 = value;
+}
+
+function ruleSheetProtectionState(sheet) {
+    const properties = ["ProtectContents", "ProtectDrawingObjects", "ProtectScenarios"];
+    let known = false;
+    let protectedState = false;
+    try {
+        for (let index = 0; index < properties.length; index++) {
+            const value = sheet[properties[index]];
+            if (typeof value !== "undefined" && value !== null) {
+                known = true;
+                protectedState = protectedState || Boolean(value);
+            }
+        }
+    } catch (error) {
+        return null;
     }
+    return known ? protectedState : null;
+}
+
+function unprotectRuleSheet(sheet) {
+    // 部分WPS环境在未受保护的工作表上调用Unprotect()会抛错，
+    // 因此先读取保护状态；旧版升级时规则表通常正处于未保护状态。
+    if (ruleSheetProtectionState(sheet) === false) {
+        return false;
+    }
+    if (typeof sheet.Unprotect !== "function") {
+        throw new Error("当前WPS环境不支持取消规则工作表保护，请升级WPS后重试");
+    }
+    // AirScript、金山文档WebOffice对可选密码参数存在实现差异，依次兼容
+    // 无参数、空字符串和对象参数三种调用方式。
+    const attempts = [
+        function () { sheet.Unprotect(); },
+        function () { sheet.Unprotect(""); },
+        function () { sheet.Unprotect({ Password: "" }); }
+    ];
+    for (let index = 0; index < attempts.length; index++) {
+        try {
+            attempts[index]();
+            if (ruleSheetProtectionState(sheet) !== true) {
+                return true;
+            }
+        } catch (error) {
+            // 继续尝试下一种在线表格兼容签名。
+        }
+    }
+    throw new Error("无法取消ListingRules保护");
+}
+
+function archivedRuleSheetName() {
+    const base = "ListingRules_旧保护";
+    for (let index = 0; index < 100; index++) {
+        const candidate = index === 0 ? base : base + "_" + index;
+        if (!findSheetByName(candidate)) {
+            return candidate;
+        }
+    }
+    throw new Error("无法为旧ListingRules生成安全备份标签");
+}
+
+function replaceLockedSystemRuleSheet(sheet) {
+    const title = displayText(scalarValue(sheet.Range("A1")));
+    if (displayText(sheet.Name) !== RULE_SHEET_NAME ||
+        (title !== "" && title !== "G组运营工作台｜库存销售规则配置")) {
+        throw new Error("ListingRules不是系统生成的规则表，不能自动替换");
+    }
+    const archivedName = archivedRuleSheetName();
+    try {
+        sheet.Name = archivedName;
+    } catch (error) {
+        throw new Error("无法重命名旧ListingRules，请检查是否有工作簿结构权限限制");
+    }
+    return {
+        sheet: ensureRuleSheet(),
+        archivedRuleSheetName: archivedName
+    };
 }
 
 function setupRuleConfig() {
-    const sheet = ensureRuleSheet();
+    let sheet = ensureRuleSheet();
+    let archivedName = "";
+    try {
+        unprotectRuleSheet(sheet);
+    } catch (error) {
+        // 金山文档在线表格没有“审阅/撤销工作表保护”入口。若系统旧规则表
+        // 无法通过API解除保护，则保留旧表并新建同名规则表，避免破坏旧数据。
+        const replacement = replaceLockedSystemRuleSheet(sheet);
+        sheet = replacement.sheet;
+        archivedName = replacement.archivedRuleSheetName;
+    }
+    // “初始化 / 检查规则配置”是显式恢复默认动作。日常同步只读取当前规则，
+    // 不会执行这里的重置。按用户最终决定，ListingRules不再设置任何保护。
+    sheet.Range("A1:E80").Value2 = "";
     const defaults = [
         ["A1", "G组运营工作台｜库存销售规则配置"],
         ["A3", "参数"], ["B3", "当前值"], ["C3", "说明"],
@@ -589,6 +692,8 @@ function setupRuleConfig() {
         ["A12", "快速下降门槛"], ["B12", -0.50],
         ["A13", "高广告费率门槛"], ["B13", 0.25],
         ["C13", "30日广告费 ÷ 30日销售额"],
+        ["A14", "补货取整倍数"], ["B14", 5],
+        ["C14", "建议补货量向上取整到该正整数的倍数"],
         ["A16", "销量档位"], ["B16", "M1 最近7日"],
         ["C16", "M2 第8—14日"], ["D16", "M3 第15—30日"],
         ["E16", "权重合计"],
@@ -597,7 +702,63 @@ function setupRuleConfig() {
         ["A19", "高销量"], ["B19", 0.50], ["C19", 0.30], ["D19", 0.20]
     ];
     for (let index = 0; index < defaults.length; index++) {
-        writeRuleDefault(sheet, defaults[index][0], defaults[index][1]);
+        writeRuleValue(sheet, defaults[index][0], defaults[index][1]);
+    }
+    const documentation = [
+        ["工作列", "结果或项目", "精确触发条件 / 计算公式", "维护方式"],
+        ["30日广告费率", "百分比 / 空", "30日广告费÷30日销售额；销售额为0或缺失时留空", "公式；门槛使用B13"],
+        ["30日实际成交均价", "金额 / 空", "30日销售额÷30日销量；销量为0或缺失时留空", "公式；仅供价格诊断，不参与补货预测"],
+        ["趋势差异率", "百分比", "(M1-M3)÷MAX(M3,1)；M1=7日销量÷7×30；M3=(30日销量-14日销量)÷16×30", "先换算为相同30天速度；14/25/35对应220%，再使用B8:B12"],
+        ["趋势差异率", "空", "7/14/30日销量缺失、负数、7日>14日、14日>30日，或30日销量<B8", "公式"],
+        ["销量状态", "数据异常", "7/14/30日销量任一缺失、负数，或7日销量>14日销量，或14日销量>30日销量", "公式；优先级1"],
+        ["销量状态", "无销量", "销量窗口有效且30日销量=0", "公式；优先级2"],
+        ["销量状态", "低销量观察", "销量窗口有效、30日销量>0且30日销量<B8", "公式；优先级3"],
+        ["销量状态", "近期启动", "30日销量>=B8，且30日销量-14日销量=0，且7日销量>0", "公式；优先级4"],
+        ["销量状态", "快速增长", "未命中前述状态，且趋势差异率>B10", "公式"],
+        ["销量状态", "增长", "未命中前述状态，且B9<趋势差异率<=B10", "公式"],
+        ["销量状态", "稳定", "未命中前述状态，且B11<=趋势差异率<=B9", "公式"],
+        ["销量状态", "下降", "未命中前述状态，且B12<=趋势差异率<B11", "公式"],
+        ["销量状态", "快速下降", "未命中前述状态，且趋势差异率<B12", "公式"],
+        ["预测可信度", "低", "任一项成立：销量状态=数据异常/无销量/近期启动/快速增长/快速下降；补货状态非空且不等于正常补货；FBA可售=0且30日销量>0", "公式；低优先于中、高；最终补货月销蓝色提示"],
+        ["预测可信度", "中", "未命中低，且任一项成立：30日销量<B6；销量状态=增长/下降；广告状态=数据不足/高广告费/广告费上涨/广告费下降", "公式；仅提醒，不阻止最终月销"],
+        ["预测可信度", "高", "同时满足：30日销量>=B6；销量状态=稳定；补货状态为空或正常补货；FBA可售>0；广告状态=正常或无广告", "公式；任一条件不满足都不是高"],
+        ["异常原因", "销量窗口异常；", "销量状态=数据异常", "公式；多项命中时按本区顺序拼接"],
+        ["异常原因", "无销量；", "销量状态=无销量", "公式"],
+        ["异常原因", "低销量；", "销量状态=低销量观察", "公式"],
+        ["异常原因", "趋势突变；", "销量状态=近期启动、快速增长或快速下降", "公式"],
+        ["异常原因", "当前无FBA可售；", "FBA可售=0且30日销量>0", "公式"],
+        ["异常原因", "广告依赖高；", "广告状态=高广告费", "公式"],
+        ["异常原因", "补货状态文本；", "补货状态非空且不等于正常补货；直接拼接实际补货状态文字", "公式；链接状态不参与"],
+        ["系统建议月销", "低销量档", "30日销量<B5：M1×B17+M2×C17+M3×D17，结果四舍五入为整数", "M1=7日/7×30；M2=(14日-7日)/7×30；M3=(30日-14日)/16×30"],
+        ["系统建议月销", "中销量档", "B5<=30日销量<B6：M1×B18+M2×C18+M3×D18，结果四舍五入为整数", "公式"],
+        ["系统建议月销", "高销量档", "30日销量>=B6：M1×B19+M2×C19+M3×D19，结果四舍五入为整数", "公式；销量窗口异常时留空"],
+        ["最终补货月销", "0", "补货状态=清库存或停售", "公式；最高优先级"],
+        ["最终补货月销", "空", "补货状态=新品观察或暂缓补货", "公式；等待人工判断"],
+        ["最终补货月销", "系统建议月销", "补货状态为其他值或留空；高/中/低可信度都自动填写", "可人工覆盖；下次数据更新恢复标准公式"],
+        ["在库覆盖天数", "天数 / 空", "最终补货月销>0时：(FBA可售+预留)÷最终补货月销×30；否则留空", "公式"],
+        ["含在途覆盖天数", "天数 / 空", "最终补货月销>0时：(FBA可售+预留+在途)÷最终补货月销×30；否则留空", "公式"],
+        ["建议补货量", "0", "补货状态=清库存或停售", "公式；最高优先级"],
+        ["建议补货量", "空", "补货状态=新品观察/暂缓补货，或最终补货月销为空/为0", "公式；等待人工判断或无有效需求"],
+        ["建议补货量", "非负整数", "缺口=最终补货月销÷30×B7-FBA可售-预留-在途；MAX(0,缺口)按B14向上取整", "例如B14=5时，1→5、13→15"],
+        ["库存状态", "数据不足", "最终补货月销为空或为0", "公式"],
+        ["库存状态", "缺货", "最终补货月销>0且FBA可售+预留=0", "公式"],
+        ["库存状态", "库存紧张", "未命中数据不足/缺货，且在库覆盖天数<30", "公式"],
+        ["库存状态", "需要补货", "在库覆盖天数>=30，且含在途覆盖天数<B7", "公式"],
+        ["库存状态", "库存健康", "B7<=含在途覆盖天数<=B7+30", "公式"],
+        ["库存状态", "库存偏高", "含在途覆盖天数>B7+30", "公式"],
+        ["广告状态", "数据不足", "7日或30日广告费缺失；或30日广告费>0但30日销售额缺失/为0导致广告费率为空", "公式"],
+        ["广告状态", "无广告", "广告数据完整且30日广告费=0", "公式"],
+        ["广告状态", "高广告费", "广告数据完整、30日广告费>0，且30日广告费率>=B13", "公式；优先于广告费涨跌"],
+        ["广告状态", "广告费上涨", "未命中高广告费；此前23日广告费<=0且7日广告费>0，或最近7日日均÷此前23日日均>1.2", "此前23日广告费=30日广告费-7日广告费"],
+        ["广告状态", "广告费下降", "未命中高广告费，且最近7日日均÷此前23日日均<0.8", "公式"],
+        ["广告状态", "正常", "数据完整且未命中无广告、高广告费、广告费上涨或广告费下降", "公式"],
+        ["链接状态", "人工自由填写", "例如高退标签、链接异常、促销中；系统不读取该列做判断", "不参与任何公式"],
+        ["运营备注", "人工自由填写", "可按需添加该表头；不是必填列", "不参与任何公式"],
+        ["规则表保护", "不设置保护", "ListingRules保持未保护，所有单元格可直接编辑；系统不再调用Protect或设置锁定区域", "修改B4:B14或B17:D19后请同步升级B4规则版本"]
+    ];
+    for (let index = 0; index < documentation.length; index++) {
+        const row = 22 + index;
+        sheet.Range("A" + row + ":D" + row).Value2 = [documentation[index]];
     }
     sheet.Range("E17").Formula = "=SUM(B17:D17)";
     sheet.Range("E18").Formula = "=SUM(B18:D18)";
@@ -608,7 +769,13 @@ function setupRuleConfig() {
     } catch (error) {
         // 格式失败不影响参数和公式的安全性。
     }
-    return sheet;
+    return {
+        sheet: sheet,
+        archivedRuleSheetName: archivedName,
+        protected: false,
+        protectionVerified: ruleSheetProtectionState(sheet) === false,
+        editableRangesApplied: false
+    };
 }
 
 function numericRule(sheet, address, label) {
@@ -636,6 +803,7 @@ function validateRuleConfig() {
     const decline = numericRule(sheet, "B11", "下降门槛");
     const fastDecline = numericRule(sheet, "B12", "快速下降门槛");
     const highAdRate = numericRule(sheet, "B13", "高广告费率门槛");
+    const replenishmentMultiple = numericRule(sheet, "B14", "补货取整倍数");
     const weights = [];
     for (let row = 17; row <= 19; row++) {
         const values = [
@@ -662,6 +830,15 @@ function validateRuleConfig() {
     if (highAdRate < 0 || highAdRate > 1) {
         throw new Error("高广告费率门槛必须在0到100%之间");
     }
+    if (replenishmentMultiple <= 0 || Math.floor(replenishmentMultiple) !== replenishmentMultiple) {
+        throw new Error("补货取整倍数必须是正整数");
+    }
+    let protectedContents = false;
+    try {
+        protectedContents = Boolean(sheet.ProtectContents);
+    } catch (error) {
+        // 旧WPS可能无法读取保护状态，不影响规则值校验。
+    }
     return {
         valid: true,
         version: version,
@@ -674,6 +851,9 @@ function validateRuleConfig() {
         declineThreshold: decline,
         fastDeclineThreshold: fastDecline,
         highAdRateThreshold: highAdRate,
+        replenishmentMultiple: replenishmentMultiple,
+        sheetName: displayText(sheet.Name),
+        protected: protectedContents,
         weights: weights
     };
 }
@@ -700,11 +880,9 @@ function listingFormulas(columns, row) {
         "<0," + sales30 + "<0)";
     const trend = c("trend_difference_rate");
     const salesStatus = c("sales_status");
-    const confidence = c("forecast_confidence");
     const systemMonthly = c("system_monthly_sales");
     const finalMonthly = c("final_monthly_sales");
     const replenishmentStatus = c("replenishment_status");
-    const linkStatus = c("link_status");
     const fba = c("fba_available");
     const reserved = c("reserved");
     const inbound = c("inbound");
@@ -724,6 +902,7 @@ function listingFormulas(columns, row) {
     const decline = ruleReference("B11");
     const fastDecline = ruleReference("B12");
     const highAd = ruleReference("B13");
+    const replenishmentMultiple = ruleReference("B14");
     const lowForecast = m1 + "*" + ruleReference("B17") + "+" +
         m2 + "*" + ruleReference("C17") + "+" + m3 + "*" + ruleReference("D17");
     const midForecast = m1 + "*" + ruleReference("B18") + "+" +
@@ -758,10 +937,9 @@ function listingFormulas(columns, row) {
             salesStatus + "=\"无销量\"," + salesStatus + "=\"近期启动\"," +
             salesStatus + "=\"快速增长\"," + salesStatus + "=\"快速下降\",AND(" +
             replenishmentStatus + "<>\"\"," + replenishmentStatus +
-            "<>\"正常补货\"),AND(" + linkStatus + "<>\"\"," + linkStatus +
-            "<>\"正常\"),AND(" + fba + "=0," + sales30 + ">0)),\"低\",IF(OR(" +
+            "<>\"正常补货\"),AND(" + fba + "=0," + sales30 + ">0)),\"低\",IF(OR(" +
             sales30 + "<" + high + "," + salesStatus + "=\"增长\"," + salesStatus +
-            "=\"下降\"," + adStatus + "=\"高广告费\"," + adStatus +
+            "=\"下降\"," + adStatus + "=\"数据不足\"," + adStatus + "=\"高广告费\"," + adStatus +
             "=\"广告费上涨\"," + adStatus + "=\"广告费下降\"),\"中\",\"高\"))",
         exception_reason: "=IF(" + salesStatus + "=\"数据异常\",\"销量窗口异常；\",\"\")&" +
             "IF(" + salesStatus + "=\"无销量\",\"无销量；\",\"\")&IF(" +
@@ -770,14 +948,13 @@ function listingFormulas(columns, row) {
             salesStatus + "=\"快速下降\"),\"趋势突变；\",\"\")&IF(AND(" +
             fba + "=0," + sales30 + ">0),\"当前无FBA可售；\",\"\")&IF(" +
             adStatus + "=\"高广告费\",\"广告依赖高；\",\"\")&IF(AND(" +
-            linkStatus + "<>\"\"," + linkStatus + "<>\"正常\")," +
-            linkStatus + "&\"；\",\"\")&IF(AND(" + replenishmentStatus +
+            replenishmentStatus +
             "<>\"\"," + replenishmentStatus + "<>\"正常补货\")," +
             replenishmentStatus + "&\"；\",\"\")",
         final_monthly_sales: "=IF(OR(" + replenishmentStatus +
             "=\"清库存\"," + replenishmentStatus + "=\"停售\"),0,IF(OR(" +
             replenishmentStatus + "=\"新品观察\"," + replenishmentStatus +
-            "=\"暂缓补货\"," + confidence + "=\"低\"),\"\"," + systemMonthly + "))",
+            "=\"暂缓补货\"),\"\"," + systemMonthly + "))",
         stock_coverage_days: "=IF(OR(" + finalMonthly + "=\"\"," + finalMonthly +
             "=0),\"\",SUM(" + fba + "," + reserved + ")/" + finalMonthly + "*30)",
         total_coverage_days: "=IF(OR(" + finalMonthly + "=\"\"," + finalMonthly +
@@ -787,8 +964,9 @@ function listingFormulas(columns, row) {
             "=\"清库存\"," + replenishmentStatus + "=\"停售\"),0,IF(OR(" +
             replenishmentStatus + "=\"新品观察\"," + replenishmentStatus +
             "=\"暂缓补货\"," + finalMonthly + "=\"\"," + finalMonthly +
-            "=0),\"\",MAX(0,ROUNDUP(" + finalMonthly + "/30*" + target +
-            "-SUM(" + fba + "," + reserved + "," + inbound + "),0))))",
+            "=0),\"\",ROUNDUP(MAX(0," + finalMonthly + "/30*" + target +
+            "-SUM(" + fba + "," + reserved + "," + inbound + "))/" +
+            replenishmentMultiple + ",0)*" + replenishmentMultiple + "))",
         inventory_status: "=IF(OR(" + finalMonthly + "=\"\"," + finalMonthly +
             "=0),\"数据不足\",IF(SUM(" + fba + "," + reserved +
             ")=0,\"缺货\",IF(" + stockDays + "<30,\"库存紧张\",IF(" +
@@ -800,19 +978,11 @@ function listingFormulas(columns, row) {
 function setListingFormula(sheet, columns, row, field, formula, overwrite) {
     const range = sheet.Range(formulaCell(columns, field, row));
     const currentFormula = scalarFormula(range);
-    const currentValue = scalarValue(range);
-    if (
-        field === "final_monthly_sales" &&
-        currentFormula === "" &&
-        displayText(currentValue) !== ""
-    ) {
-        return "manual";
-    }
     if (!overwrite && currentFormula !== "") {
         return "formula";
     }
-    // 除“最终补货月销”外，派生列不接受静态值，避免旧计算结果长期滞留。
-    // 最终补货月销的静态值在上方已识别为人工覆盖并受到保护。
+    // 人工最终月销只对当前这次判断有效。下一次数据同步会恢复标准公式，
+    // 避免新销量数据继续沿用上一次人工判断。
     range.Formula = formula;
     if (field === "ad_rate_30d" || field === "trend_difference_rate") {
         range.NumberFormat = "0.0%";
@@ -853,15 +1023,135 @@ function installListingFormulas(sheet, columns, rows, overwrite) {
     };
 }
 
+function normalizedConditionFormula(value) {
+    return displayText(value).replace(/\$/g, "").replace(/\s+/g, "").toUpperCase();
+}
+
+function installLowConfidenceHighlight(sheet, columns, headerRow, lastRow) {
+    if (lastRow <= headerRow) {
+        return { applied: true, range: "" };
+    }
+    const firstRow = headerRow + 1;
+    const finalColumn = columns.final_monthly_sales.columnLetter;
+    const confidenceColumn = columns.forecast_confidence.columnLetter;
+    const targetAddress = finalColumn + firstRow + ":" + finalColumn + lastRow;
+    const formula = "=$" + confidenceColumn + firstRow + "=\"低\"";
+    try {
+        const targetRange = sheet.Range(targetAddress);
+        const conditions = targetRange.FormatConditions;
+        if (!conditions || typeof conditions.Add !== "function") {
+            return { applied: false, range: targetAddress };
+        }
+        let condition = null;
+        let legacyCondition = null;
+        const expected = normalizedConditionFormula(formula);
+        const legacyFormula = normalizedConditionFormula(
+            "=$" + confidenceColumn + firstRow + "=\"中\""
+        );
+        const count = Number(conditions.Count) || 0;
+        for (let index = 1; index <= count; index++) {
+            const candidate = conditions.Item(index);
+            const candidateFormula = normalizedConditionFormula(candidate.Formula1);
+            if (candidateFormula === expected) {
+                condition = candidate;
+                break;
+            }
+            if (candidateFormula === legacyFormula) {
+                legacyCondition = candidate;
+            }
+        }
+        // 版本8安装过“中可信度”条件格式，版本9及以后必须将它改为“低”，
+        // 否则新旧规则会同时着色。
+        if (!condition && legacyCondition) {
+            try {
+                legacyCondition.Formula1 = formula;
+            } catch (error) {
+                // 某些WebOffice版本的Formula1是只读属性。
+            }
+            if (normalizedConditionFormula(legacyCondition.Formula1) === expected) {
+                condition = legacyCondition;
+            } else if (typeof legacyCondition.Modify === "function") {
+                const modifyAttempts = [
+                    function () { legacyCondition.Modify(2, -1, formula, ""); },
+                    function () {
+                        legacyCondition.Modify({
+                            Type: 2, Operator: -1, Formula1: formula, Formula2: ""
+                        });
+                    }
+                ];
+                for (let index = 0; index < modifyAttempts.length; index++) {
+                    try {
+                        modifyAttempts[index]();
+                        if (normalizedConditionFormula(legacyCondition.Formula1) === expected) {
+                            condition = legacyCondition;
+                            break;
+                        }
+                    } catch (error) {
+                        // 继续尝试另一种条件格式修改签名。
+                    }
+                }
+            }
+            if (!condition && typeof legacyCondition.Delete === "function") {
+                try {
+                    legacyCondition.Delete();
+                    legacyCondition = null;
+                } catch (error) {
+                    // 下方会返回明确失败，不叠加两套提示色。
+                }
+            }
+            if (!condition && legacyCondition) {
+                return {
+                    applied: false,
+                    range: targetAddress,
+                    message: "无法移除旧的中可信度提示色"
+                };
+            }
+        }
+        if (condition && typeof condition.ModifyAppliesToRange === "function") {
+            condition.ModifyAppliesToRange(targetRange);
+        }
+        if (!condition) {
+            let expressionType = 2;
+            try {
+                expressionType = Application.Enum.XlFormatConditionType.xlExpression;
+            } catch (error) {
+                // Excel/WPS中xlExpression的稳定枚举值是2。
+            }
+            condition = conditions.Add(expressionType, -1, formula, "");
+        }
+        // 低可信度使用“蓝色，着色1，淡色60%”（#9DC3E6）。
+        // Excel RGB整数为BGR顺序。
+        condition.Interior.Color = 15123357;
+        if (typeof condition.SetFirstPriority === "function") {
+            condition.SetFirstPriority();
+        }
+        return { applied: true, range: targetAddress };
+    } catch (error) {
+        return {
+            applied: false,
+            range: targetAddress,
+            message: displayText(error && error.message ? error.message : error)
+        };
+    }
+}
+
+function isSpreadsheetError(value) {
+    return /^#(NAME\?|REF!|DIV\/0!|VALUE!|N\/A|NUM!|NULL!|SPILL!|CALC!)/i.test(
+        displayText(value)
+    );
+}
+
 function formulaStateCounts(sheet, columns, headerRow) {
     const lastRow = lastUsedRow(sheet, headerRow);
     let formulaRows = 0;
     let manualOverrideRows = 0;
+    let formulaErrorRows = 0;
     for (let row = headerRow + 1; row <= lastRow; row++) {
         if (normalizeMsku(scalarValue(sheet.Range(formulaCell(columns, "msku", row)))) === "") {
             continue;
         }
         let complete = true;
+        let hasFormulaError = false;
         for (let index = 0; index < FORMULA_FIELDS.length; index++) {
             const field = FORMULA_FIELDS[index];
             const range = sheet.Range(formulaCell(columns, field, row));
@@ -872,13 +1162,22 @@ function formulaStateCounts(sheet, columns, headerRow) {
             }
             if (formula === "") {
                 complete = false;
+            } else if (isSpreadsheetError(scalarValue(range))) {
+                hasFormulaError = true;
             }
         }
         if (complete) {
             formulaRows++;
         }
+        if (hasFormulaError) {
+            formulaErrorRows++;
+        }
     }
-    return { formulaRows: formulaRows, manualOverrideRows: manualOverrideRows };
+    return {
+        formulaRows: formulaRows,
+        manualOverrideRows: manualOverrideRows,
+        formulaErrorRows: formulaErrorRows
+    };
 }
 
 function listingStoredValue(sheet, columns, row, field) {
@@ -1133,6 +1432,8 @@ function applyListingChanges(
             if (
                 ready.field === "current_data_date" ||
                 ready.field === "previous_data_date" ||
+                ready.field === "rating_review" ||
+                ready.field === "previous_rating_review" ||
                 ready.field === "updated_at"
             ) {
                 range.NumberFormat = "@";
@@ -1194,8 +1495,11 @@ const located = locateHeaders(targetSheet);
 const headerRow = located.row;
 const columns = located.columns;
 if (action === "setup_rules") {
-    setupRuleConfig();
+    const setupConfig = setupRuleConfig();
     const setupRules = validateRuleConfig();
+    setupRules.protected = setupConfig.protected;
+    setupRules.protectionVerified = setupConfig.protectionVerified;
+    setupRules.editableRangesApplied = setupConfig.editableRangesApplied;
     const setupLastRow = lastUsedRow(targetSheet, headerRow);
     const setupRows = [];
     for (let row = headerRow + 1; row <= setupLastRow; row++) {
@@ -1208,6 +1512,9 @@ if (action === "setup_rules") {
         }
     }
     installListingFormulas(targetSheet, columns, setupRows, true);
+    const setupHighlight = installLowConfidenceHighlight(
+        targetSheet, columns, headerRow, setupLastRow
+    );
     const setupCounts = formulaStateCounts(targetSheet, columns, headerRow);
     const setupResult = {
         success: true,
@@ -1218,7 +1525,11 @@ if (action === "setup_rules") {
         headers: columnHeaders(columns),
         rules: setupRules,
         formulaRows: setupCounts.formulaRows,
-        manualOverrideRows: setupCounts.manualOverrideRows
+        manualOverrideRows: setupCounts.manualOverrideRows,
+        formulaErrorRows: setupCounts.formulaErrorRows,
+        archivedRuleSheetName: setupConfig.archivedRuleSheetName,
+        lowConfidenceHighlightApplied: setupHighlight.applied,
+        lowConfidenceHighlightRange: setupHighlight.range
     };
     console.log(JSON.stringify(setupResult));
     return setupResult;
@@ -1251,7 +1562,8 @@ const baseResult = {
     headers: columnHeaders(columns),
     rules: rules,
     formulaRows: formulaCounts.formulaRows,
-    manualOverrideRows: formulaCounts.manualOverrideRows
+    manualOverrideRows: formulaCounts.manualOverrideRows,
+    formulaErrorRows: formulaCounts.formulaErrorRows
 };
 
 if (action === "validate") {
@@ -1467,9 +1779,13 @@ for (let index = 0; index < stateRowKeys.length; index++) {
         formulaRows.push(state.row);
     }
 }
-const installedFormulaState = installListingFormulas(
+installListingFormulas(
     targetSheet, columns, formulaRows, false
 );
+const syncHighlight = installLowConfidenceHighlight(
+    targetSheet, columns, headerRow, lastRow
+);
+const installedFormulaState = formulaStateCounts(targetSheet, columns, headerRow);
 const stateKeys = Object.keys(states);
 for (let index = 0; index < stateKeys.length; index++) {
     const state = states[stateKeys[index]];
@@ -1492,7 +1808,10 @@ const result = Object.assign(baseResult, {
     failures: failures,
     rules: rules,
     formulaRows: installedFormulaState.formulaRows,
-    manualOverrideRows: installedFormulaState.manualOverrideRows
+    manualOverrideRows: installedFormulaState.manualOverrideRows,
+    formulaErrorRows: installedFormulaState.formulaErrorRows,
+    lowConfidenceHighlightApplied: syncHighlight.applied,
+    lowConfidenceHighlightRange: syncHighlight.range
 });
 console.log(JSON.stringify(result));
 return result;
