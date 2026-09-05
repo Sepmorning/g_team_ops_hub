@@ -90,18 +90,6 @@ def infer_country_code(country_name: str) -> str:
     return item.code if item else ""
 
 
-def default_site_sheet_names(
-    shop_name: str, country_name: str, country_code: str
-) -> tuple[str, str, str]:
-    code = normalize_country_code(country_code)
-    listing = f"{shop_name.strip()}-{country_name.strip()}" if shop_name.strip() else ""
-    return (
-        listing,
-        f"{code}-FBA" if code else "",
-        f"{code}-轨迹明细" if code else "",
-    )
-
-
 def listing_prefixes(sheet_names: Iterable[str]) -> list[str]:
     """返回工作簿中按“前缀-国家”识别到的唯一Listing前缀。"""
     prefixes: dict[str, str] = {}

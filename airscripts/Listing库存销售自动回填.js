@@ -168,6 +168,11 @@ function displayText(value) {
     return String(value === null || value === undefined ? "" : value).trim();
 }
 
+function returnResult(result) {
+    console.log(JSON.stringify(result));
+    return result;
+}
+
 function normalizeHeader(value) {
     return displayText(value).replace(/\s+/g, "");
 }
@@ -1477,8 +1482,7 @@ if (action === "discover") {
         schemaVersion: SCHEMA_VERSION,
         sheets: workbookSheets()
     };
-    console.log(JSON.stringify(discoveryResult));
-    return discoveryResult;
+    return returnResult(discoveryResult);
 }
 if (sheetName === "") {
     throw new Error("未提供Listing子表名称");
@@ -1531,8 +1535,7 @@ if (action === "setup_rules") {
         lowConfidenceHighlightApplied: setupHighlight.applied,
         lowConfidenceHighlightRange: setupHighlight.range
     };
-    console.log(JSON.stringify(setupResult));
-    return setupResult;
+    return returnResult(setupResult);
 }
 let rules = { valid: false, version: "" };
 try {
@@ -1567,8 +1570,7 @@ const baseResult = {
 };
 
 if (action === "validate") {
-    console.log(JSON.stringify(baseResult));
-    return baseResult;
+    return returnResult(baseResult);
 }
 
 if (action === "snapshot") {
@@ -1577,8 +1579,7 @@ if (action === "snapshot") {
             targetSheet, columns, headerRow, items
         )
     });
-    console.log(JSON.stringify(snapshotResult));
-    return snapshotResult;
+    return returnResult(snapshotResult);
 }
 
 if (action === "snapshot_targets") {
@@ -1595,8 +1596,7 @@ if (action === "snapshot_targets") {
         );
     });
     const targetResult = Object.assign(baseResult, { snapshots: snapshots });
-    console.log(JSON.stringify(targetResult));
-    return targetResult;
+    return returnResult(targetResult);
 }
 
 if (action === "inspect_changes" || action === "apply_changes") {
@@ -1614,8 +1614,7 @@ if (action === "inspect_changes" || action === "apply_changes") {
             targetSheet, columns, headerRow, changes, direction, indexOffset
         );
     const response = Object.assign(baseResult, changeResult);
-    console.log(JSON.stringify(response));
-    return response;
+    return returnResult(response);
 }
 
 verifyListingPreconditions(
@@ -1813,5 +1812,4 @@ const result = Object.assign(baseResult, {
     lowConfidenceHighlightApplied: syncHighlight.applied,
     lowConfidenceHighlightRange: syncHighlight.range
 });
-console.log(JSON.stringify(result));
-return result;
+return returnResult(result);

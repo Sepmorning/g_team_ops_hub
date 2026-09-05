@@ -120,6 +120,7 @@ g_team_ops_hub/
 │  │  ├─ templates/        Jinja2页面
 │  │  └─ static/           本地主题、公共CSS/JavaScript、SVG图标、WebP壁纸和首页动态效果
 │  ├─ airscript.py         WPS AirScript客户端
+│  ├─ airscript_transport.py  两套AirScript客户端共用的安全HTTP传输
 │  ├─ listing.py           领星文件解析与Listing AirScript客户端
 │  ├─ sites.py             国家站点命名识别与安全映射
 │  ├─ auth.py              系统账号
@@ -182,7 +183,7 @@ FBA仍是物流、库存和共享表中的业务术语，不因产品更名而�
 Listing使用独立脚本 `airscripts\Listing库存销售自动回填.js`，最终表头、规则配置和启用步骤见
 `库存销售表格模块使用说明.md`。两个脚本使用不同Webhook和令牌。
 
-物流脚本结构版本为11，Listing脚本结构版本为8。两个脚本都支持只读扫描当前
+物流脚本结构版本为11，Listing脚本结构版本为10。两个脚本都支持只读扫描当前
 工作簿的全部子表；物流脚本由网页明确传入所选站点的FBA主表和轨迹明细表，
 不再固定为美国。两张物流表仍按第一行表头名称定位列，不依赖列字母；
 标准表头可以与店铺、备注等业务列混排。Listing源文件和共享表同样按表头名称
@@ -257,6 +258,6 @@ Listing脚本，最后点击“扫描共享表”识别 `店铺-国家`、`国�
 - `POST /api/backups`：管理员创建并校验SQLite一致性备份
 - `POST /api/backups/{backup_id}/verify`：管理员重新校验备份哈希与数据库完整性
 
-旧的 `/api/connections/*`、`/api/query` 和单配置AirScript接口已经移除。
-
-本轮发现、修复和保留风险详见 `项目代码审计报告.md`。
+旧的 `/api/connections/*`、`/api/query` 和单配置AirScript接口已经移除。当前约束、
+已知风险和后续事项分别以本README、`架构与模块开发规范.md`及`开发日志.md`为准，
+不再维护容易过期的阶段性审计副本。

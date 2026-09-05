@@ -467,9 +467,34 @@ def test_authentication_and_script_errors_are_classified():
 
 
 def test_network_failure_is_retried_and_classified(monkeypatch):
-    monkeypatch.setattr("g_team_ops.airscript.time.sleep", lambda *_args: None)
+    monkeypatch.setattr("g_team_ops.airscript_transport.time.sleep", lambda *_args: None)
     session = FakeSession([requests.ConnectionError("offline"), requests.ConnectionError("offline")])
     client = AirScriptClient(config(), session=session, retries=1)
     with pytest.raises(NetworkError):
         client.validate()
     assert len(session.calls) == 2
+
+
+def test_apply_changes_preserves_partial_result_when_later_batch_fails(monkeypatch):
+    client = AirScriptClient(config())
+    calls = 0
+
+    def execute(_action, _items, _arguments=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "applied": [{"index": 0}],
+                "alreadyApplied": [],
+                "conflicts": [],
+                "failures": [],
+            }
+        raise ResponseError("第二批恢复失败")
+
+    monkeypatch.setattr("g_team_ops.airscript.AIRSCRIPT_CHANGE_BATCH_SIZE", 1)
+    monkeypatch.setattr(client, "_execute", execute)
+
+    with pytest.raises(ResponseError) as caught:
+        client.apply_changes([{"index": 0}, {"index": 1}], direction="rollback")
+
+    assert caught.value.partial_change_result["applied"] == [{"index": 0}]

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 import posixpath
 import re
 import secrets
@@ -20,13 +19,11 @@ from .airscript import (
     parse_share_file_id,
     validate_webhook_url,
 )
+from .airscript_transport import execute_airscript_request
 from .errors import (
-    AuthenticationError,
+    CarrierError,
     ConfigurationError,
-    NetworkError,
-    RateLimitError,
     ResponseError,
-    ServerError,
 )
 
 
@@ -814,94 +811,19 @@ class ListingAirScriptClient:
         }
         if arguments:
             argv.update(arguments)
-        payload = {
-            "Context": {
-                "argv": argv
-            }
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "AirScript-Token": self.config.api_token,
-        }
-        response: requests.Response | None = None
-        for attempt in range(self.retries + 1):
-            try:
-                response = self.session.post(
-                    self.config.webhook_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.timeout,
-                )
-            except requests.RequestException as exc:
-                if attempt < self.retries:
-                    time.sleep(0.8 * (attempt + 1))
-                    continue
-                raise NetworkError(
-                    "连接Listing AirScript失败，请检查网络后重试"
-                ) from exc
-            if response.status_code in (401, 403):
-                raise AuthenticationError(
-                    "Listing脚本令牌无效、已过期，或当前账号没有表格编辑权限"
-                )
-            if response.status_code == 429:
-                if attempt < self.retries:
-                    time.sleep(1.2 * (attempt + 1))
-                    continue
-                raise RateLimitError("Listing AirScript请求过于频繁，请稍后重试")
-            if response.status_code >= 500:
-                if attempt < self.retries:
-                    time.sleep(1.2 * (attempt + 1))
-                    continue
-                raise ServerError(
-                    f"Listing AirScript服务暂时不可用（HTTP {response.status_code}）"
-                )
-            if response.status_code >= 400:
-                raise ResponseError(
-                    f"Listing AirScript请求失败（HTTP {response.status_code}）"
-                )
-            break
-        assert response is not None
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise ResponseError("Listing AirScript返回的内容不是有效JSON") from exc
-        if not isinstance(body, dict):
-            raise ResponseError("Listing AirScript返回的数据结构无效")
-        if body.get("error"):
-            details = body.get("error_details")
-            detail_message = details.get("msg") if isinstance(details, dict) else ""
-            raise ResponseError(
-                "Listing AirScript执行失败："
-                + str(detail_message or body.get("error"))
-            )
-        if body.get("status") not in (None, "finished"):
-            raise ResponseError("Listing AirScript未正常执行完成")
-        data = body.get("data")
-        if not isinstance(data, dict) or "result" not in data:
-            raise ResponseError("Listing AirScript响应中缺少脚本执行结果")
-        result: Any = data["result"]
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except json.JSONDecodeError as exc:
-                raise ResponseError(
-                    "Listing AirScript脚本返回值不是有效JSON对象"
-                ) from exc
-        if not isinstance(result, dict):
-            raise ResponseError("Listing AirScript脚本返回值结构无效")
-        if result.get("success") is not True:
-            raise ResponseError(
-                str(result.get("message") or "Listing AirScript报告执行失败")
-            )
-        try:
-            version = int(result.get("schemaVersion") or 0)
-        except (TypeError, ValueError):
-            version = 0
-        if version < REQUIRED_LISTING_SCRIPT_VERSION:
-            raise ResponseError(
+        return execute_airscript_request(
+            session=self.session,
+            webhook_url=self.config.webhook_url,
+            api_token=self.config.api_token,
+            argv=argv,
+            timeout=self.timeout,
+            retries=self.retries,
+            service_name="Listing AirScript",
+            required_schema_version=REQUIRED_LISTING_SCRIPT_VERSION,
+            upgrade_message=(
                 "WPS中的Listing AirScript版本过旧，请替换为项目内最新脚本"
-            )
-        return result
+            ),
+        )
 
     @staticmethod
     def _binding_from_result(result: dict[str, Any]) -> ListingAirScriptBinding:
@@ -1082,13 +1004,7 @@ class ListingAirScriptClient:
                         "expected_rule_version": expected_rule_version,
                     },
                 )
-            except (
-                NetworkError,
-                AuthenticationError,
-                RateLimitError,
-                ServerError,
-                ResponseError,
-            ) as exc:
+            except CarrierError as exc:
                 batch_number = offset // LISTING_WRITE_BATCH_SIZE + 1
                 total_batches = (
                     len(payload_rows) + LISTING_WRITE_BATCH_SIZE - 1

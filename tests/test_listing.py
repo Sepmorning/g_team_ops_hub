@@ -7,6 +7,7 @@ import pytest
 from g_team_ops.errors import ConfigurationError, ResponseError
 from g_team_ops.listing import (
     ListingAirScriptClient,
+    ListingConnectionConfig,
     SOURCE_HEADERS,
     TARGET_HEADERS,
     infer_listing_data_date,
@@ -289,3 +290,37 @@ def test_listing_binding_rejects_formula_errors_before_import():
                 "formulaErrorRows": 32,
             }
         )
+
+
+def test_listing_apply_changes_preserves_partial_result_when_later_batch_fails(
+    monkeypatch,
+):
+    client = ListingAirScriptClient(
+        ListingConnectionConfig(
+            "https://www.kdocs.cn/l/share123",
+            "https://www.kdocs.cn/api/v3/ide/file/file-id/script/script-id/sync_task",
+            "placeholder-airscript-token",
+            "纯粹-美国",
+        )
+    )
+    calls = 0
+
+    def execute(_action, _rows, _data_date="", arguments=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "applied": [{"index": 0}],
+                "alreadyApplied": [],
+                "conflicts": [],
+                "failures": [],
+            }
+        raise ResponseError("第二批恢复失败")
+
+    monkeypatch.setattr("g_team_ops.listing.AIRSCRIPT_CHANGE_BATCH_SIZE", 1)
+    monkeypatch.setattr(client, "_execute", execute)
+
+    with pytest.raises(ResponseError) as caught:
+        client.apply_changes([{"index": 0}, {"index": 1}], direction="rollback")
+
+    assert caught.value.partial_change_result["applied"] == [{"index": 0}]

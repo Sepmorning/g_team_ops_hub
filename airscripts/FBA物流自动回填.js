@@ -137,6 +137,11 @@ function displayText(value) {
     return String(value === null || value === undefined ? "" : value).trim();
 }
 
+function returnResult(result) {
+    console.log(JSON.stringify(result));
+    return result;
+}
+
 function workbookSheets() {
     const sheets = Application.Sheets;
     const result = [];
@@ -1499,8 +1504,7 @@ if (action === "discover") {
         schemaVersion: SCHEMA_VERSION,
         sheets: workbookSheets()
     };
-    console.log(JSON.stringify(discoveryResult));
-    return discoveryResult;
+    return returnResult(discoveryResult);
 }
 
 if (sheetName === "" || detailSheetName === "") {
@@ -1531,8 +1535,7 @@ const baseResult = {
 };
 
 if (action === "validate") {
-    console.log(JSON.stringify(baseResult));
-    return baseResult;
+    return returnResult(baseResult);
 }
 
 if (action === "snapshot") {
@@ -1549,8 +1552,7 @@ if (action === "snapshot") {
             argv.include_cleanup === true
         )
     });
-    console.log(JSON.stringify(snapshotResult));
-    return snapshotResult;
+    return returnResult(snapshotResult);
 }
 
 if (action === "snapshot_targets") {
@@ -1577,8 +1579,7 @@ if (action === "snapshot_targets") {
         );
     });
     const targetResult = Object.assign(baseResult, { snapshots: snapshots });
-    console.log(JSON.stringify(targetResult));
-    return targetResult;
+    return returnResult(targetResult);
 }
 
 if (action === "inspect_changes" || action === "apply_changes") {
@@ -1608,8 +1609,7 @@ if (action === "inspect_changes" || action === "apply_changes") {
             indexOffset
         );
     const response = Object.assign(baseResult, changeResult);
-    console.log(JSON.stringify(response));
-    return response;
+    return returnResult(response);
 }
 
 const lastRow = lastUsedRow(targetSheet, sheetName);
@@ -1764,11 +1764,7 @@ for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
     if (displayText(main.route) === "" && displayText(item.route) !== "") {
         main.route = item.route;
     }
-    if (action === "sync_tracking" && displayText(main.route) === "") {
-        failures.push(fba);
-        continue;
-    }
-    if (action === "sync" && displayText(main.route) === "") {
+    if ((action === "sync_tracking" || action === "sync") && displayText(main.route) === "") {
         failures.push(fba);
         continue;
     }
@@ -1940,5 +1936,4 @@ const result = Object.assign(baseResult, {
     detailRowsRemoved: detailRowsRemoved
 });
 
-console.log(JSON.stringify(result));
-return result;
+return returnResult(result);
