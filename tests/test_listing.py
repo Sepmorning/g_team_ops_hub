@@ -273,6 +273,17 @@ def test_blank_sales_window_clears_stale_metric_and_marks_data_incomplete():
     assert parsed.rows[0].to_payload()["sales_7d"] == ""
 
 
+def test_negative_sales_are_visible_as_invalid_windows_instead_of_stale_values():
+    headers = list(SOURCE_HEADERS)
+    values = source_row(**{"7日销量": -1})
+    parsed = parse_listing_export(
+        build_listing_xlsx(headers, [[values[item] for item in headers]])
+    )
+    assert parsed.rows[0].to_payload()["sales_7d"] == -1
+    assert parsed.rows[0].source_warning == "销量窗口存在负数"
+    assert parsed.data_warnings
+
+
 def test_filename_date_rule():
     assert infer_listing_data_date("Listing20260726-939972.xlsx") == "2026-07-26"
 
@@ -324,3 +335,24 @@ def test_listing_apply_changes_preserves_partial_result_when_later_batch_fails(
         client.apply_changes([{"index": 0}, {"index": 1}], direction="rollback")
 
     assert caught.value.partial_change_result["applied"] == [{"index": 0}]
+
+
+def test_listing_rejected_response_does_not_claim_zero_writes(monkeypatch):
+    from types import SimpleNamespace
+    from g_team_ops.errors import AuthenticationError
+
+    client = ListingAirScriptClient(ListingConnectionConfig(
+        "https://www.kdocs.cn/l/share123",
+        "https://www.kdocs.cn/api/v3/ide/file/file-id/script/script-id/sync_task",
+        "placeholder-airscript-token", "测试",
+    ))
+    def rejected(*args, **kwargs):
+        raise AuthenticationError("令牌无效")
+    monkeypatch.setattr(client, "_execute", rejected)
+    row = SimpleNamespace(to_payload=lambda: {"msku": "SKU-1"})
+    with pytest.raises(AuthenticationError) as caught:
+        client.sync((row,), "2026-09-08")
+    message = caught.value.user_message
+    assert "本批可能已经写入" in message
+    assert "不能据此确认令牌失效" in message
+    assert "此前已处理 0 条" not in message

@@ -55,7 +55,7 @@ def config(token="placeholder-airscript-token"):
 def finished(result):
     if isinstance(result, dict) and result.get("success") is True:
         result = {
-            "schemaVersion": 11,
+            "schemaVersion": 13,
             "detailSheetName": "US-轨迹明细",
             **result,
         }
@@ -127,7 +127,7 @@ def test_dynamic_country_sheet_names_and_workbook_discovery_are_forwarded():
                 body=finished(
                     {
                         "success": True,
-                        "schemaVersion": 11,
+                        "schemaVersion": 13,
                         "sheets": [
                             {"id": "listing", "name": "纯粹-加拿大"},
                             {"id": "main", "name": "CA-FBA"},
@@ -156,7 +156,7 @@ def test_validate_accepts_json_string_result():
     result = json.dumps(
         {
             "success": True,
-            "schemaVersion": 11,
+            "schemaVersion": 13,
             "detailSheetName": "US-轨迹明细",
             "sheetName": "US-FBA",
             "columns": {
@@ -347,6 +347,7 @@ def test_rich_sync_sends_snapshot_and_deduplicated_event_payload():
             )
         ]
     )
+    session.responses.append(FakeResponse(body=finished({"success": True})))
     result = TrackingResult(
         fba="FBA11111",
         status=QueryStatus.SUCCESS,
@@ -410,7 +411,7 @@ def test_rich_sync_batches_are_kept_small():
                 }
             )
         )
-        for _ in range(2)
+        for _ in range(3)
     ]
     session = FakeSession(responses)
     values = [
@@ -428,7 +429,7 @@ def test_rich_sync_batches_are_kept_small():
     assert [
         len(call[1]["json"]["Context"]["argv"]["items"])
         for call in session.calls
-    ] == [AIRSCRIPT_RICH_WRITE_BATCH_SIZE, 1]
+    ] == [AIRSCRIPT_RICH_WRITE_BATCH_SIZE, 1, 0]
 
 
 def test_old_airscript_schema_is_rejected_with_upgrade_message():
@@ -473,6 +474,50 @@ def test_network_failure_is_retried_and_classified(monkeypatch):
     with pytest.raises(NetworkError):
         client.validate()
     assert len(session.calls) == 2
+
+
+def test_uncertain_write_is_not_automatically_repeated():
+    session = FakeSession([requests.ConnectionError("lost response")])
+    with pytest.raises(NetworkError):
+        AirScriptClient(config(), session=session, retries=3).sync_tracking_results([])
+    assert len(session.calls) == 1
+
+
+def test_row_preconditions_use_raw_snapshot_without_mutating_audit_values():
+    session = FakeSession([FakeResponse(body=finished({"success": True}))])
+    row = {"targetType": "row", "field": "__row__", "matchValue": "event-id",
+        "value": {"fba": "FBA12345", "content": "原轨迹"},
+        "comparableValue": {"content": "原轨迹", "fba": "FBA12345"}}
+    cell = {"targetType": "cell", "value": 1, "comparableValue": "1"}
+    AirScriptClient(config(), session=session)._execute("sync_tracking", [], {"preconditions": [row, cell]})
+    sent = session.calls[0][1]["json"]["Context"]["argv"]["preconditions"]
+    assert "comparableValue" not in sent[0]
+    assert sent[0]["value"] == row["value"]
+    assert sent[0]["matchValue"] == "event-id"
+    assert sent[1] == cell
+    assert "comparableValue" in row
+
+
+def test_detail_guard_is_carried_between_batches_and_final_organization(monkeypatch):
+    initial = {"targetType": "tracking_table", "value": "before"}
+    input_guard = {"targetType": "tracking_inputs", "value": []}
+    client = AirScriptClient(config())
+    seen = []
+
+    def execute(action, items, args):
+        seen.append((action, args["preconditions"]))
+        return {"detailGuard": {"targetType": "tracking_table", "value": len(seen)},
+                "inputGuard": {"targetType": "tracking_inputs", "value": len(seen)}}
+
+    monkeypatch.setattr(client, "_execute", execute)
+    results = [TrackingResult(f"FBA{i:05d}", QueryStatus.SUCCESS, carrier="安达",
+        latest_event="已开船", snapshot=TrackingSnapshot()) for i in range(AIRSCRIPT_RICH_WRITE_BATCH_SIZE + 1)]
+    client.sync_tracking_results(results, [initial, input_guard])
+    assert [action for action, _ in seen] == ["sync_tracking", "sync_tracking", "organize"]
+    assert [next(item["value"] for item in guards if item["targetType"] == "tracking_table")
+            for _, guards in seen] == ["before", 1, 2]
+    assert [next(item["value"] for item in guards if item["targetType"] == "tracking_inputs")
+            for _, guards in seen] == [[], 1, 2]
 
 
 def test_apply_changes_preserves_partial_result_when_later_batch_fails(monkeypatch):

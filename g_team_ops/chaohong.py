@@ -207,6 +207,6 @@ class ChaoHongQueryService:
                 detail.get("no") or detail.get("tag_no") or fba
             ),
             structured={
-                "pickup_time": detail.get("start_at"),
+                "pickup_time": "",
             },
         )

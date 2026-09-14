@@ -168,7 +168,7 @@ def test_anda_detail_uses_structured_fields_and_full_timeline():
 
     assert client.trace_numbers == ["TRACE-1"]
     assert details.snapshot.transport_ref == "TEST / 001E"
-    assert details.snapshot.pickup_time == "2026-06-01"
+    assert details.snapshot.pickup_time == ""
     assert details.snapshot.actual_departure == "2026-06-11"
     assert details.snapshot.actual_arrival == "2026-07-03"
     assert len(details.events) == 2

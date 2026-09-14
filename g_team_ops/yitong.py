@@ -355,6 +355,6 @@ class YiTongQueryService:
             raw_events=raw_events,
             carrier_order_no=str(record.get("waybillNo") or order_id),
             structured={
-                "pickup_time": record.get("inboundTime"),
+                "pickup_time": "",
             },
         )

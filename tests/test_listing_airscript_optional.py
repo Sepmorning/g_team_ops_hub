@@ -63,7 +63,8 @@ class FakeSheet {
                 this._cell(rowIndex + 1, columnIndex + 1).value = value;
             });
         });
-        this.UsedRange = { Row: 1, Rows: { Count: rows.length } };
+        this.UsedRange = { Row: 1, Rows: { Count: rows.length }, Column: 1,
+            Columns: { Count: Math.max(1, ...rows.map(row => row.length)) } };
     }
 
     Protect() { this.ProtectContents = true; }
@@ -189,12 +190,12 @@ class FakeSheet {
 function validRuleSheet(name = "ListingRules") {
     const sheet = new FakeSheet(name, []);
     const values = {
-        B4: "R1.0", B5: 10, B6: 30, B7: 90, B8: 10,
-        B9: 0.20, B10: 0.50, B11: -0.20, B12: -0.50, B13: 0.25,
-        B14: 5,
-        B17: 0.30, C17: 0.25, D17: 0.45,
-        B18: 0.40, C18: 0.30, D18: 0.30,
-        B19: 0.50, C19: 0.30, D19: 0.20
+        A2: "三窗口预测-v3", B4: "R3.0", B5: 20, B6: 30, B7: 90, B8: 10,
+        B9: 0.20, B10: 0.25, B11: -0.20, B12: 0.10, B13: 0.25,
+        B14: 5, B15: 0.30, B20: 10,
+        B17: 0.40, C17: 0.30, D17: 0.30,
+        B18: 0.60, C18: 0.30, D18: 0.10,
+        B19: 0.70, C19: 0.20, D19: 0.10
     };
     Object.entries(values).forEach(([address, value]) => {
         sheet.Range(address).Value2 = value;
@@ -405,7 +406,27 @@ const recoveryConflict = executeWith(recoverySheet, {
     direction: "rollback"
 });
 
+const oldHeaders = requiredHeaders.filter(header => header !== "月销计算方案");
+const upgradeSheet = new FakeSheet("纯粹-美国", targetRows(oldHeaders));
+const upgradeResult = executeWith(upgradeSheet, {action:"setup_rules",sheet_name:"纯粹-美国"});
+const upgradedHeader = upgradeSheet.Range(columnName(oldHeaders.length+1)+"1").Value2[0][0];
+executeWith(upgradeSheet, {action:"setup_rules",sheet_name:"纯粹-美国"});
+const extraHeader = upgradeSheet.Range(columnName(oldHeaders.length+2)+"1").Value2[0][0];
+const plan=executeWith(upgradeSheet,{action:"forecast_plan",sheet_name:"纯粹-美国"});
+// Remote JSON serializers can reorder object properties without changing data.
+plan.entries.forEach(entry=>{entry.inputs=Object.fromEntries(Object.entries(entry.inputs).reverse());});
+const dateBefore=upgradeSheet.value("本次数据日期",oldHeaders);
+const historyBefore=upgradeSheet.value("上次7日销量",oldHeaders);
+const recalculated=executeWith(upgradeSheet,{action:"forecast_apply",sheet_name:"纯粹-美国",entries:plan.entries,rule_signature:plan.ruleSignature,preconditions:plan.snapshots});
+const historyUnchanged=dateBefore===upgradeSheet.value("本次数据日期",oldHeaders)&&historyBefore===upgradeSheet.value("上次7日销量",oldHeaders);
+const stalePlan=executeWith(upgradeSheet,{action:"forecast_plan",sheet_name:"纯粹-美国"});
+upgradeSheet._cell(2,oldHeaders.indexOf("链接状态")+1).value="冻结";
+let recalculateConflict="";
+try {executeWith(upgradeSheet,{action:"forecast_apply",sheet_name:"纯粹-美国",entries:stalePlan.entries,rule_signature:stalePlan.ruleSignature,preconditions:stalePlan.snapshots});}
+catch(error){recalculateConflict=error.message;}
 console.log(JSON.stringify({
+    recalculated,historyUnchanged,recalculateConflict,
+    upgradedHeader, extraHeader, upgradeResult,
     priced,
     blanked,
     missingTarget,
@@ -435,7 +456,7 @@ console.log(JSON.stringify({
     ruleParameterLocked: legacyRuleSheet.Range("B4").Locked,
     ruleWeightLocked: legacyRuleSheet.Range("B17").Locked,
     confidenceDocumentation: legacyRuleSheet.Range("A36:D38").Value2,
-    protectionDocumentation: legacyRuleSheet.Range("A71:D71").Value2,
+    protectionDocumentation: legacyRuleSheet.Range("A63:D63").Value2,
     lockedSetupResult,
     archivedLockedRuleSheetName: lockedRuleSheet.Name,
     replacementRuleSheetProtected: replacementRuleSheet.ProtectContents,
@@ -465,7 +486,12 @@ console.log(JSON.stringify({
     )
     payload = json.loads(completed.stdout.strip().splitlines()[-1])
 
-    assert payload["priced"]["schemaVersion"] == 10
+    assert payload["priced"]["schemaVersion"] == 13
+    assert payload["upgradedHeader"] == "月销计算方案"
+    assert payload["extraHeader"] == ""
+    assert payload["recalculated"]["updated"] == 1
+    assert payload["historyUnchanged"] is True
+    assert "重算输入已变化" in payload["recalculateConflict"]
     assert payload["priceAfterWrite"] == 15.99
     assert payload["priceAfterBlank"] == ""
     assert payload["ratingAfterWrite"] == "5/4"
@@ -474,28 +500,18 @@ console.log(JSON.stringify({
     assert "discount_price" not in payload["missingTarget"]["columns"]
     assert payload["regularPrice"] == 19.99
     assert payload["blanked"]["failures"] == []
-    assert payload["priced"]["rules"]["version"] == "R1.0"
+    assert payload["priced"]["rules"]["version"] == "R3.0"
     assert payload["priced"]["rules"]["replenishmentMultiple"] == 5
     assert payload["priced"]["formulaErrorRows"] == 0
     assert payload["manualResult"]["manualOverrideRows"] == 0
-    assert payload["manualFinal"] == ""
-    assert payload["manualFinalFormula"].startswith("=IF(")
-    assert payload["systemFormula"].startswith("=IF(")
-    assert "'ListingRules'!$B$17" in payload["systemFormula"]
-    assert "'ListingRules'!$D$19" in payload["systemFormula"]
-    assert "ROUNDUP(MAX(0," in payload["replenishmentFormula"]
+    assert isinstance(payload["manualFinal"], (int, float))
+    assert payload["manualFinalFormula"] == ""
+    assert payload["systemFormula"] == ""
+    assert payload["confidenceFormula"] == ""
+    assert payload["exceptionFormula"] == ""
+    assert payload["finalFormula"] == ""
+    assert "ROUNDUP(" in payload["replenishmentFormula"]
     assert "'ListingRules'!$B$14" in payload["replenishmentFormula"]
-    assert "INT(" not in payload["replenishmentFormula"]
-    assert payload["linkStatusCell"] not in payload["confidenceFormula"]
-    assert payload["linkStatusCell"] not in payload["exceptionFormula"]
-    assert '="数据不足"' in payload["confidenceFormula"]
-    assert "(V2/7*30)" in payload["trendFormula"]
-    assert "((X2-W2)/16*30)" in payload["trendFormula"]
-    assert payload["confidenceCell"] not in payload["finalFormula"]
-    assert '="清库存"' in payload["finalFormula"]
-    assert '="停售"' in payload["finalFormula"]
-    assert '="新品观察"' in payload["finalFormula"]
-    assert '="暂缓补货"' in payload["finalFormula"]
     assert payload["highlightFormula"].endswith('="低"')
     assert payload["highlightColor"] == 15123357
     assert payload["setupResult"]["formulaRows"] == 1
@@ -505,11 +521,11 @@ console.log(JSON.stringify({
     assert payload["setupResult"]["rules"]["protectionVerified"] is True
     assert payload["setupResult"]["rules"]["editableRangesApplied"] is False
     assert payload["migratedRuleSheetName"] == "ListingRules"
-    assert payload["resetLowBoundary"] == 10
+    assert payload["resetLowBoundary"] == 20
     assert payload["ruleSheetProtected"] is False
     assert [row[1] for row in payload["confidenceDocumentation"]] == ["低", "中", "高"]
     assert "FBA可售=0" in payload["confidenceDocumentation"][0][2]
-    assert "广告状态=数据不足" in payload["confidenceDocumentation"][1][2]
+    assert "未同时满足全部高条件" in payload["confidenceDocumentation"][1][2]
     assert "同时满足" in payload["confidenceDocumentation"][2][2]
     assert payload["protectionDocumentation"][0][1] == "不设置保护"
     assert payload["lockedSetupResult"]["archivedRuleSheetName"].startswith(
@@ -517,7 +533,7 @@ console.log(JSON.stringify({
     )
     assert payload["archivedLockedRuleSheetName"].startswith("ListingRules_旧保护")
     assert payload["replacementRuleSheetProtected"] is False
-    assert payload["replacementLowBoundary"] == 10
+    assert payload["replacementLowBoundary"] == 20
     assert "规则版本在预览后发生变化" in payload["versionConflict"]
     assert payload["recoveryWithoutRules"]["success"] is True
     assert payload["recoveryWithoutRules"]["rules"]["valid"] is False

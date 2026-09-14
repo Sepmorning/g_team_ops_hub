@@ -1,6 +1,6 @@
 import requests
 
-from g_team_ops.client import AndaClient
+from g_team_ops.client import AndaClient, TRACKING_QUERY_FIELDS
 from g_team_ops.errors import AuthenticationError, NetworkError, ResponseError
 
 
@@ -81,3 +81,30 @@ def test_malformed_login_result_is_safely_classified():
         assert exc.category == "authentication"
     else:
         raise AssertionError("expected AuthenticationError")
+
+
+def test_anda_query_explicitly_requests_fba_and_full_tracking_fields():
+    from g_team_ops.service import AndaQueryService
+    from g_team_ops.models import QueryStatus
+
+    class ProjectedSession:
+        def post(self, url, **kwargs):
+            payload = kwargs["json"]
+            assert payload["conditionDtos"][0]["value"] == "FBA12345"
+            assert payload["conditionDtos"][1] == {
+                "field": "clientReturnStatus", "operator": "not_equal", "value": 20}
+            row = {"jobId": "job-test", "shipmentId": "shipment-test"}
+            # Reproduce the new API: unrequested columns are omitted, even for a hit.
+            values = {"fbaCode": "FBA12345", "traceNo": "trace-test",
+                "latestTraceTime": "2026-09-12 09:38:00", "latestTraceName": "已提柜，待拆柜"}
+            row.update({key: value for key, value in values.items() if key in payload.get("fields", [])})
+            assert set(TRACKING_QUERY_FIELDS) <= set(payload.get("fields", []))
+            return FakeResponse(payload={"success": True, "result": {"records": [row]}})
+
+    client = AndaClient(session=ProjectedSession(), retries=0)
+    client.token = "test-token"
+    service = AndaQueryService(client, request_interval=0)
+    result = service.query_many(["FBA12345"])[0]
+    assert result.status == QueryStatus.SUCCESS
+    assert result.latest_event == "已提柜，待拆柜"
+    assert service.last_records["FBA12345"]["traceNo"] == "trace-test"

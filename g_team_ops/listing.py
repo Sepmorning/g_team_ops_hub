@@ -21,6 +21,7 @@ from .airscript import (
 )
 from .airscript_transport import execute_airscript_request
 from .errors import (
+    AuthenticationError,
     CarrierError,
     ConfigurationError,
     ResponseError,
@@ -33,7 +34,7 @@ MAX_XLSX_ENTRIES = 2_000
 MAX_LISTING_ROWS = 20_000
 LISTING_WRITE_BATCH_SIZE = 50
 LISTING_PREVIEW_TTL_SECONDS = 20 * 60
-REQUIRED_LISTING_SCRIPT_VERSION = 10
+REQUIRED_LISTING_SCRIPT_VERSION = 13
 
 SOURCE_HEADERS = (
     "MSKU",
@@ -156,6 +157,7 @@ TARGET_HEADERS = (
     "30日实际成交均价",
     "趋势差异率",
     "销量状态",
+    "月销计算方案",
     "预测可信度",
     "异常原因",
     "系统建议月销",
@@ -169,7 +171,7 @@ TARGET_HEADERS = (
     "本次更新时间",
 )
 
-OPTIONAL_TARGET_HEADERS = ("优惠价", "运营备注")
+OPTIONAL_TARGET_HEADERS = ("优惠价", "运营备注", "产品属性")
 
 _SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _RELATIONSHIP_NS = (
@@ -186,7 +188,7 @@ def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _number(value: Any, label: str, row_number: int) -> int | float | None:
+def _number(value: Any, label: str, row_number: int, *, allow_negative: bool = False) -> int | float | None:
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     if isinstance(value, bool):
@@ -195,7 +197,7 @@ def _number(value: Any, label: str, row_number: int) -> int | float | None:
         number = float(str(value).replace(",", "").strip())
     except (TypeError, ValueError) as exc:
         raise ConfigurationError(f"第{row_number}行“{label}”不是有效数字") from exc
-    if not number >= 0 or number == float("inf"):
+    if number != number or abs(number) == float("inf") or (number < 0 and not allow_negative):
         raise ConfigurationError(f"第{row_number}行“{label}”不能为负数或无穷大")
     return int(number) if number.is_integer() else number
 
@@ -233,8 +235,6 @@ def sales_window_warning(
     """检查领星滚动累计窗口，不静默修正倒挂数据。"""
     if sales_7d is None or sales_14d is None or sales_30d is None:
         return "销量窗口数据不完整"
-    if sales_7d < 0 or sales_14d < 0 or sales_30d < 0:
-        return "销量窗口存在负数"
     if sales_7d < 0 or sales_14d < 0 or sales_30d < 0:
         return "销量窗口存在负数"
     if sales_7d > sales_14d:
@@ -602,13 +602,13 @@ def parse_listing_export(data: bytes) -> ParsedListingExport:
                 source_value(values, "FBA标发在途"), "FBA标发在途", row_number
             )
             sales_7d = _number(
-                source_value(values, "7日销量"), "7日销量", row_number
+                source_value(values, "7日销量"), "7日销量", row_number, allow_negative=True
             )
             sales_14d = _number(
-                source_value(values, "14日销量"), "14日销量", row_number
+                source_value(values, "14日销量"), "14日销量", row_number, allow_negative=True
             )
             sales_30d = _number(
-                source_value(values, "30日销量"), "30日销量", row_number
+                source_value(values, "30日销量"), "30日销量", row_number, allow_negative=True
             )
             source_warning = sales_window_warning(
                 sales_7d,
@@ -879,6 +879,31 @@ class ListingAirScriptClient:
         """显式恢复默认规则、详细说明、标准公式和低可信度提示色。"""
         return self._binding_from_result(self._execute("setup_rules", []))
 
+    def forecast_plan(self) -> dict[str, Any]:
+        pages = []
+        start = 1
+        while True:
+            page = self._execute("forecast_plan", [], arguments={"start_row": start})
+            self._binding_from_result(page)
+            pages.append(page)
+            next_row = page.get("nextRow")
+            if next_row is None:
+                break
+            if not isinstance(next_row, int) or next_row <= start or next_row > MAX_LISTING_ROWS + 12:
+                raise ResponseError("重算分页游标无效")
+            start = next_row
+        return {"pages": pages, "snapshots": [item for page in pages for item in _listing_snapshot_list(page.get("snapshots"))]}
+
+    def apply_forecast_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        updated = 0
+        for page in plan["pages"]:
+            result = self._execute("forecast_apply", [], arguments={
+                "entries": page["entries"], "rule_signature": page["ruleSignature"],
+                "preconditions": page["snapshots"],
+            })
+            updated += int(result.get("updated") or 0)
+        return {"updated": updated}
+
     def discover_sheets(self) -> list[dict[str, str]]:
         result = self._execute("discover", [])
         try:
@@ -1009,10 +1034,14 @@ class ListingAirScriptClient:
                 total_batches = (
                     len(payload_rows) + LISTING_WRITE_BATCH_SIZE - 1
                 ) // LISTING_WRITE_BATCH_SIZE
+                reason = (
+                    "远端拒绝请求（HTTP 401/403）；可能涉及令牌、权限或访问策略，不能据此确认令牌失效"
+                    if isinstance(exc, AuthenticationError) else exc.user_message
+                )
                 raise type(exc)(
-                    f"Listing第 {batch_number}/{total_batches} 批回填失败；"
-                    f"此前已处理 {offset} 条。同日重试不会再次滚动上次值："
-                    f"{exc.user_message}"
+                    f"Listing第 {batch_number}/{total_batches} 批未收到成功确认；"
+                    f"此前批次确认完成 {offset} 条，本批可能已经写入。"
+                    f"请以操作历史的回读差异为准，不要将此提示理解为零写入：{reason}"
                 ) from exc
             summary.updated.extend(_string_list(result.get("updated")))
             summary.same_date_updated.extend(

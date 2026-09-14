@@ -177,6 +177,6 @@ def test_full_router_activities_are_normalized_after_list_query():
     details = service.fetch_tracking_details("FBA11111")
 
     assert session.calls[1][2]["json"] == {"orderIds": ["ORDER-1"]}
-    assert details.snapshot.pickup_time == "2026-06-01"
+    assert details.snapshot.pickup_time == ""
     assert details.snapshot.actual_departure == "2026-06-05"
     assert details.snapshot.actual_arrival == "2026-07-20"

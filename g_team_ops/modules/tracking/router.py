@@ -19,6 +19,7 @@ from ...web.services import (
     summary_dict,
 )
 from ..operations.shared_table import SharedTableOperationManager
+from .service import header_signature, initialize_headers
 
 
 def build_router(ctx: WebContext) -> APIRouter:
@@ -33,6 +34,7 @@ def build_router(ctx: WebContext) -> APIRouter:
         results,
         idempotency_key: str,
         operation_type: str,
+        expected_inputs=None,
     ):
         client = AirScriptClient(
             config,
@@ -45,7 +47,8 @@ def build_router(ctx: WebContext) -> APIRouter:
             shop_id=shop_id,
             country_id=country_id,
             idempotency_key=idempotency_key,
-            snapshot_before=lambda: client.snapshot_tracking_results(results),
+            snapshot_before=lambda: client.snapshot_tracking_results(results, expected_inputs)
+            if expected_inputs is not None else client.snapshot_tracking_results(results),
             apply=lambda before: client.sync_tracking_results(
                 results,
                 preconditions=before,
@@ -76,6 +79,33 @@ def build_router(ctx: WebContext) -> APIRouter:
                 carrier_statuses=ctx.coordinator.configured_status(account.id),
             ),
         )
+
+    @router.post("/api/tracking/headers/preview")
+    @router.post("/api/tracking/headers/apply")
+    async def tracking_headers_api(request: Request):
+        account = ctx.require_api_user(request)
+        check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await ctx.json_payload(request)
+        shop_id = str(payload.get("shop_id") or "")
+        country_id = str(payload.get("country_id") or "")
+        try:
+            config, _, _ = ctx.logistics_config(ctx.database_for(account.id), shop_id, country_id)
+            client = AirScriptClient(config, retries=ctx.coordinator.settings.retries)
+            if request.url.path.endswith("/preview"):
+                preview = await asyncio.to_thread(client.preview_headers)
+                return {"ok": True, "plans": preview.get("plans", []), "signature": header_signature(preview)}
+            signature = str(payload.get("signature") or "")
+            request_key = str(request.headers.get("Idempotency-Key") or "")
+            if len(signature) != 64 or not request_key:
+                return json_error("请先预览物流表头，再确认补齐")
+            result = await asyncio.to_thread(initialize_headers, ctx.operations, account.id,
+                shop_id, country_id, client, signature, request_key)
+            return {"ok": True, "message": "物流表头已补齐，现有列和数据已保留", "operation_id": result.batch.id}
+        except (CarrierError, ConfigurationError) as exc:
+            return json_error(exc.user_message)
+        except Exception:
+            ctx.logger.exception("tracking_headers_failed user=%s", account.id)
+            return json_error("表头处理失败，请到操作历史核对后再试", 500)
 
     @router.post("/api/tracking/query")
     async def query_api(request: Request):
@@ -187,6 +217,14 @@ def build_router(ctx: WebContext) -> APIRouter:
             pending_items = await asyncio.to_thread(
                 client.list_pending_tracking_items
             )
+            if getattr(client, "completion_pending", False):
+                # 签收数据已由用户填写时先审计补齐完成状态，本轮不发出货代查询。
+                await asyncio.to_thread(
+                    guarded_sync, account.id, shop_id, country_id, config, [],
+                    str(request.headers.get("Idempotency-Key") or secrets.token_urlsafe(18)) + ":complete",
+                    "automatic_tracking_completion", getattr(client, "pending_input_guard", None),
+                )
+                pending_items = await asyncio.to_thread(client.list_pending_tracking_items)
         except (CarrierError, ConfigurationError) as exc:
             return json_error(exc.user_message)
         if not pending_items:
@@ -200,6 +238,7 @@ def build_router(ctx: WebContext) -> APIRouter:
                     [],
                     str(request.headers.get("Idempotency-Key") or secrets.token_urlsafe(18)),
                     "automatic_tracking_cleanup",
+                    getattr(client, "pending_input_guard", None),
                 )
                 cleanup_summary = guarded.business_result
             except (CarrierError, ConfigurationError) as exc:
@@ -286,6 +325,7 @@ def build_router(ctx: WebContext) -> APIRouter:
                 response.results,
                 str(request.headers.get("Idempotency-Key") or secrets.token_urlsafe(18)),
                 "automatic_tracking_sync",
+                getattr(client, "pending_input_guard", None),
             )
             response.wps_summary = guarded.business_result
             operation = guarded.batch.to_payload()

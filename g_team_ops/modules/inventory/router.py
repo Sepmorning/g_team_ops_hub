@@ -180,6 +180,49 @@ def build_router(ctx: WebContext) -> APIRouter:
             ),
         }
 
+    @router.post("/api/inventory/countries/{country_id}/forecast/details")
+    async def listing_forecast_details(country_id: str, request: Request):
+        account = ctx.require_api_user(request)
+        check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await ctx.json_payload(request)
+        try:
+            config, _, _ = ctx.listing_config(ctx.database_for(account.id), str(payload.get("shop_id") or ""), country_id)
+            plan = await asyncio.to_thread(ListingAirScriptClient(config).forecast_plan)
+            return {"ok": True, "entries": [entry for page in plan["pages"] for entry in page["entries"]]}
+        except (CarrierError, ConfigurationError) as exc:
+            return json_error(exc.user_message)
+
+    @router.post("/api/inventory/countries/{country_id}/forecast/recalculate")
+    async def recalculate_listing_forecast(country_id: str, request: Request):
+        account = ctx.require_api_user(request)
+        check_csrf(request, request.headers.get("X-CSRF-Token"))
+        payload = await ctx.json_payload(request)
+        shop_id = str(payload.get("shop_id") or "").strip()
+        key = str(request.headers.get("Idempotency-Key") or "").strip()
+        if not key:
+            return json_error("缺少重算请求标识，请刷新页面重试")
+        try:
+            config, _, _ = ctx.listing_config(ctx.database_for(account.id), shop_id, country_id)
+            client = ListingAirScriptClient(config, retries=ctx.coordinator.settings.retries)
+            prepared = {}
+
+            def snapshot_before():
+                prepared.update(client.forecast_plan())
+                return prepared["snapshots"]
+
+            guarded = await asyncio.to_thread(
+                operation_manager.execute,
+                profile_id=account.id, module_name="inventory", operation_type="listing_recalculate",
+                shop_id=shop_id, country_id=country_id, idempotency_key=key,
+                snapshot_before=snapshot_before, apply=lambda before: client.apply_forecast_plan(prepared),
+                snapshot_after=client.snapshot_targets, serialize_result=lambda result: result,
+                restore_result=lambda result: result, is_partial=lambda result: False,
+                initial_summary={"action": "重算月销，恢复最终月销为系统建议"},
+            )
+            return {"ok": True, "message": f"已重算 {guarded.business_result['updated']} 行；最终月销已更新，历史数据未滚动。", "operation": guarded.batch.to_payload()}
+        except (CarrierError, ConfigurationError) as exc:
+            return json_error(exc.user_message)
+
     @router.post("/api/inventory/imports/preview")
     async def preview_listing_import_api(request: Request):
         account = ctx.require_api_user(request)

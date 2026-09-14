@@ -26,6 +26,16 @@ QUERY_URL = "https://fms.yunwuyun.com/api/oms/fbxOrder/queryFbxOrderList"
 TRACE_URL = "https://fms.yunwuyun.com/api/fms/bizTrace/getTraceList/"
 ORIGIN = "https://oms.yunwuyun.com"
 
+# The current OMS API returns only selected columns. Without this projection,
+# real orders can omit fbaCode and traceNo and cannot be matched safely.
+TRACKING_QUERY_FIELDS = (
+    "fbaCode", "latestTraceTime", "latestTraceName", "stateName",
+    "traceNo", "waybillNo", "orderNo", "jobId", "shipmentId",
+    "vesselName", "shipName", "voyageNo", "voyage",
+    "etd", "atd", "eta", "ata", "estimatedDeliveryTime",
+    "signReceiveTime", "orderStatusMap",
+)
+
 
 def encrypt_login_password(plaintext: str) -> dict[str, str]:
     """按现有网页接口协议生成一次性 AES-CBC 登录字段。"""
@@ -168,6 +178,7 @@ class AndaClient:
             "currentPage": 1,
             "pageSize": max(20, len(fbas)),
             "total": None,
+            "fields": list(TRACKING_QUERY_FIELDS),
             "conditionDtos": [
                 {"field": "oms_plat_combination", "operator": "multi_eq_sort", "value": "\n".join(fbas)},
                 {"field": "clientReturnStatus", "operator": "not_equal", "value": 20},

@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 13;
 const DEFAULT_SHEET_NAME = "US-FBA";
 const DEFAULT_DETAIL_SHEET_NAME = "US-轨迹明细";
 const HEADER_END_COLUMN = "CV";
@@ -38,7 +38,7 @@ const DETAIL_FIELD_DEFINITIONS = {
     event_time: ["轨迹发生时间"],
     phase: ["标准阶段"],
     node: ["标准节点"],
-    event_type: ["信息属性"],
+    event_type: ["轨迹类型", "信息属性"],
     content: ["物流轨迹原文"],
     related_plan: ["涉及计划"],
     validity: ["有效状态"],
@@ -65,6 +65,7 @@ const MAIN_VALUE_FIELDS = [
     "estimated_delivery",
     "last_mile_time",
     "signed_time",
+    "completion",
     "pod_status",
     "data_status",
     "updated_time"
@@ -83,7 +84,8 @@ const PROTECTED_ACTUAL_FIELDS = {
     pickup_time: true,
     actual_departure: true,
     actual_arrival: true,
-    signed_time: true
+    signed_time: true,
+    last_mile_time: true
 };
 
 const CLEARABLE_FIELDS = {
@@ -114,10 +116,11 @@ const DETAIL_TEXT_FIELDS = {
 
 const DETAIL_DATE_TIME_FIELDS = {
     event_time: true,
-    first_seen: true,
-    last_confirmed: true,
     updated_at: true
 };
+
+// 隐藏旧系统列，保留历史值和事件定位，避免破坏既有操作的条件恢复。
+const HIDDEN_DETAIL_FIELDS = ["event_id", "carrier_order_no", "source_status", "first_seen", "last_confirmed"];
 
 const MAIN_FIELD_LABELS = {
     pickup_time: "提货",
@@ -576,7 +579,8 @@ function activeFbasFromMain(sheet, columns, lastRow) {
         // 与一键查询保持同一口径：只有“是否完成”为空才属于活跃货件。
         if (
             isValidFba(fba) &&
-            normalizeText(completionValues[index]) === ""
+            normalizeText(completionValues[index]) === "" &&
+            displayText(scalarValue(sheet.Range(columns.signed_time.columnLetter + (index + 2)))) === ""
         ) {
             result[fba] = true;
         }
@@ -793,17 +797,13 @@ function syncEvents(detailSheet, detailColumns, acceptedItems) {
     const detailLastRow = lastUsedRow(detailSheet, detailSheet.Name);
     const existingIds = Object.create(null);
     const mutableFields = [
-        "carrier_order_no",
         "phase",
         "node",
         "event_type",
         "related_plan",
         "validity",
         "exception_status",
-        "transport_info",
-        "source_status",
-        "last_confirmed",
-        "updated_at"
+        "transport_info"
     ];
     const mutableValues = Object.create(null);
     if (detailLastRow >= 2) {
@@ -903,6 +903,8 @@ function syncEvents(detailSheet, detailColumns, acceptedItems) {
                     }
                 }
                 if (eventChanged) {
+                    if (!writesByField.updated_at) writesByField.updated_at = [];
+                    writesByField.updated_at.push({row: existing.row, value: displayText(event.updated_at)});
                     updatedCount++;
                 } else {
                     unchangedCount++;
@@ -961,7 +963,7 @@ function syncEvents(detailSheet, detailColumns, acceptedItems) {
         const group = columnGroups[groupIndex];
         const rows = newEvents.map(function (event) {
             return group.map(function (item) {
-                return displayText(event[item.key]);
+                return ["carrier_order_no", "source_status", "first_seen", "last_confirmed"].indexOf(item.key) >= 0 ? "" : displayText(event[item.key]);
             });
         });
         detailSheet.Range(
@@ -1178,7 +1180,155 @@ function collectTrackingSnapshots(
             )
         );
     }
-    return snapshots;
+    // A complete detail image preserves custom values and ordering during cleanup.
+    const guarded = includeCleanup ? snapshots.filter(function (item) { return item.targetType === "cell"; }) : snapshots;
+    if (includeCleanup) {
+        Object.keys(rowsByFba).forEach(function (fba) {
+            const rows = rowsByFba[fba];
+            if (rows.length !== 1 || seenFbas[fba]) return;
+            if (displayText(scalarValue(mainSheet.Range(mainColumns.signed_time.columnLetter + rows[0]))) === "") return;
+            ["signed_time", "completion"].forEach(function (field) {
+                const snapshot = trackingCellSnapshot(mainSheet, mainColumns, fba, rows[0], field);
+                snapshot.reason = "cleanup";
+                guarded.push(snapshot);
+            });
+        });
+        guarded.push(inputSnapshot(mainSheet, mainColumns), tableSnapshot(detailSheet));
+    }
+    return guarded;
+}
+
+function tableImage(sheet) {
+    const lastRow = lastUsedRow(sheet, sheet.Name);
+    const used = sheet.UsedRange;
+    const width = used && used.Columns ? Number(used.Column || 1) + Number(used.Columns.Count) - 1 : 100;
+    if (!width || width > 100 || lastRow * width > 100000) {
+        throw new Error("轨迹明细超出安全整理范围（100列、10万个单元格），已停止");
+    }
+    const range = sheet.Range("A1:" + columnNumberToName(width) + Math.max(1, lastRow));
+    if (range.MergeCells === true || range.MergeCells === null) {
+        throw new Error("轨迹明细含合并单元格，请先取消合并再整理");
+    }
+    const values = range.Value2;
+    const rows = Array.isArray(values) ? values.map(function (row) {
+        return Array.isArray(row) ? row.slice() : [row];
+    }) : [[values]];
+    // Formula-bearing detail sheets cannot be reordered without changing references.
+    const formulas = range.Formula;
+    if (Array.isArray(formulas) && formulas.some(function (row) {
+        return (Array.isArray(row) ? row : [row]).some(function (cell) {
+            return typeof cell === "string" && cell.charAt(0) === "=";
+        });
+    })) throw new Error("轨迹明细含公式，不能安全移动整行；请将公式移至其他子表");
+    let right = 1;
+    rows.forEach(function (row) {
+        row.forEach(function (value, index) { if (value !== null && value !== undefined && value !== "") right = Math.max(right, index + 1); });
+    });
+    const trimmed = rows.map(function (row) { return row.slice(0, right).map(function (value) { return value == null ? "" : value; }); });
+    while (trimmed.length > 1 && trimmed[trimmed.length - 1].every(function (v) { return v === ""; })) trimmed.pop();
+    const formats = trimmed.map(function (row, index) {
+        return row.map(function (_value, column) {
+            return sheet.Range(columnNumberToName(column + 1) + (index + 1)).NumberFormat || "General";
+        });
+    });
+    return { headers: trimmed[0], rows: trimmed.slice(1), formats: formats.slice(1) };
+}
+
+function tableSnapshot(sheet) {
+    const value = tableImage(sheet);
+    return { targetType: "tracking_table", sheetName: sheet.Name, matchHeader: "事件编号", matchValue: "__detail__", itemKey: "__detail__", field: "__table__", value: value, comparableValue: value };
+}
+
+function inputSnapshot(sheet, columns) {
+    const rows = [];
+    const last = lastUsedRow(sheet, sheet.Name);
+    for (let row = 2; row <= last; row++) {
+        const fba = normalizeFba(scalarValue(sheet.Range(columns.fba.columnLetter + row)));
+        if (fba) rows.push([fba, displayText(scalarValue(sheet.Range(columns.carrier.columnLetter + row))), normalizeText(scalarValue(sheet.Range(columns.completion.columnLetter + row))), comparableMainValue("signed_time", scalarValue(sheet.Range(columns.signed_time.columnLetter + row)))]);
+    }
+    return { targetType: "tracking_inputs", sheetName: sheet.Name, matchHeader: columns.fba.text, matchValue: "__inputs__", itemKey: "__inputs__", field: "__inputs__", value: rows, comparableValue: rows.map(function (row) { return row.slice(0, 2); }) };
+}
+
+function writeTableImage(sheet, value) {
+    const current = tableImage(sheet);
+    if (!sameComparable(current.headers, value.headers)) throw new Error("明细表头已变化，不能恢复或整理");
+    const width = value.headers.length;
+    const count = Math.max(current.rows.length, value.rows.length);
+    if (count) {
+        const rows = value.rows.slice();
+        while (rows.length < count) rows.push(Array(width).fill(""));
+        sheet.Range("A2:" + columnNumberToName(width) + (count + 1)).Value2 = rows;
+        value.formats.forEach(function (row, index) {
+            row.forEach(function (format, column) { sheet.Range(columnNumberToName(column + 1) + (index + 2)).NumberFormat = format; });
+        });
+    }
+}
+
+function organizeDetails(mainSheet, mainColumns, detailSheet, detailColumns) {
+    const image = tableImage(detailSheet);
+    const inputs = inputSnapshot(mainSheet, mainColumns).value;
+    const ranks = Object.create(null);
+    inputs.forEach(function (row, index) { if (row[2] === "" && row[3] === "" && !(row[0] in ranks)) ranks[row[0]] = index; });
+    const fbaColumn = detailColumns.fba.columnNumber - 1;
+    const timeColumn = detailColumns.event_time.columnNumber - 1;
+    const records = image.rows.map(function (row, index) { return { row: row, format: image.formats[index], index: index }; });
+    const kept = records.filter(function (item) {
+        const fba = normalizeFba(item.row[fbaColumn]);
+        return !isValidFba(fba) || fba in ranks;
+    });
+    const active = kept.filter(function (item) { return isValidFba(normalizeFba(item.row[fbaColumn])); });
+    active.sort(function (a, b) {
+        return ranks[normalizeFba(a.row[fbaColumn])] - ranks[normalizeFba(b.row[fbaColumn])] ||
+            comparableDetailValue("event_time", a.row[timeColumn]).localeCompare(comparableDetailValue("event_time", b.row[timeColumn])) || a.index - b.index;
+    });
+    let index = 0;
+    const ordered = kept.map(function (item) { return isValidFba(normalizeFba(item.row[fbaColumn])) ? active[index++] : item; });
+    const next = { headers: image.headers, rows: ordered.map(function (item) { return item.row; }), formats: ordered.map(function (item) { return item.format; }) };
+    if (!sameComparable(image, next)) writeTableImage(detailSheet, next);
+    return records.length - kept.length;
+}
+
+function completeSignedRows(sheet, columns, updated, updatedCells) {
+    const rows = buildRowsByFba(sheet, columns, lastUsedRow(sheet, sheet.Name));
+    Object.keys(rows).forEach(function (fba) {
+        // 重复FBA不能安全按业务键恢复，保持不写。
+        if (rows[fba].length !== 1) return;
+        const row = rows[fba][0];
+        if (displayText(scalarValue(sheet.Range(columns.signed_time.columnLetter + row))) === "") return;
+        const address = columns.completion.columnLetter + row;
+        const previous = displayText(scalarValue(sheet.Range(address)));
+        if (previous === "是") return;
+        sheet.Range(address).Value2 = "是";
+        pushUnique(updated, fba);
+        updatedCells.push({ fba: fba, row: row, address: address, field: "completion", header: columns.completion.text, oldValue: previous, newValue: "是" });
+    });
+}
+
+function headerSnapshot(sheet) {
+    const values = firstRowValues(sheet.Range("A1:" + HEADER_END_COLUMN + "1").Value2).map(function (v) { return v == null ? "" : v; });
+    const used = sheet.UsedRange;
+    const usedRight = used && used.Columns ? Number(used.Column || 1) + Number(used.Columns.Count) - 1 : 0;
+    return { targetType: "tracking_headers", sheetName: sheet.Name, matchHeader: "__headers__", matchValue: "__headers__", itemKey: "__headers__", field: "__headers__", value: values, comparableValue: values, usedRight: usedRight };
+}
+
+function headerPlan(sheet, definitions) {
+    const values = headerSnapshot(sheet).value;
+    const additions = [];
+    let right = 0;
+    values.forEach(function (v, i) { if (displayText(v)) right = i + 1; });
+    const used = sheet.UsedRange;
+    if (used && used.Columns) right = Math.max(right, Number(used.Column || 1) + Number(used.Columns.Count) - 1);
+    Object.keys(definitions).forEach(function (field) {
+        const aliases = definitions[field].map(normalizeText);
+        const found = values.filter(function (value) { return aliases.indexOf(normalizeText(value)) >= 0; });
+        if (found.length > 1) throw new Error(sheet.Name + "表头重复：" + definitions[field][0]);
+        if (!found.length) {
+            right++;
+            if (right > 100) throw new Error("缺少表头无法在100列安全范围内追加");
+            additions.push({ field: field, header: definitions[field][0], column: right });
+        }
+    });
+    return { sheetName: sheet.Name, additions: additions };
 }
 
 function currentTrackingSnapshot(
@@ -1191,6 +1341,13 @@ function currentTrackingSnapshot(
     cachedDetailRows
 ) {
     const targetType = displayText(target && target.targetType).toLowerCase();
+    if (targetType === "tracking_headers") {
+        if (target.sheetName === mainSheet.Name) return headerSnapshot(mainSheet);
+        if (target.sheetName === detailSheet.Name) return headerSnapshot(detailSheet);
+        throw new Error("表头快照不属于当前站点");
+    }
+    if (targetType === "tracking_inputs" && target.sheetName === mainSheet.Name) return inputSnapshot(mainSheet, mainColumns);
+    if (targetType === "tracking_table" && target.sheetName === detailSheet.Name) return tableSnapshot(detailSheet);
     if (targetType === "cell") {
         if (
             normalizeText(target.sheetName) !== normalizeText(mainSheet.Name)
@@ -1244,10 +1401,20 @@ function currentTrackingSnapshot(
 }
 
 function sameComparable(left, right) {
-    return JSON.stringify(left) === JSON.stringify(right);
+    function canonical(value) {
+        if (Array.isArray(value)) return value.map(canonical);
+        if (value && typeof value === "object") {
+            const result = {};
+            Object.keys(value).sort().forEach(function (key) { result[key] = canonical(value[key]); });
+            return result;
+        }
+        return value;
+    }
+    return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 
 function expectedComparable(target, value) {
+    if (displayText(target.targetType).indexOf("tracking_") === 0) return value;
     return displayText(target.targetType).toLowerCase() === "row"
         ? comparableDetailRow(value)
         : comparableMainValue(displayText(target.field), value);
@@ -1286,7 +1453,7 @@ function verifyTrackingPreconditions(
         ) ? expected.comparableValue : expectedComparable(
             expected, expected.value
         );
-        if (!sameComparable(current.comparableValue, comparable)) {
+        if (expected.targetType === "tracking_inputs" ? !sameComparable(current.value, expected.value) : !sameComparable(current.comparableValue, comparable)) {
             throw new Error(
                 "共享表在写前快照后发生变化：" +
                 displayText(expected.itemKey || expected.matchValue) +
@@ -1382,6 +1549,11 @@ function applyTrackingChange(
     change,
     desiredValue
 ) {
+    if (displayText(change.targetType) === "tracking_table" && change.sheetName === detailSheet.Name) {
+        writeTableImage(detailSheet, desiredValue);
+        return;
+    }
+    if (displayText(change.targetType).indexOf("tracking_") === 0) throw new Error("输入及表头只用于核对，不通过数据恢复修改");
     if (displayText(change.targetType).toLowerCase() === "cell") {
         const current = currentTrackingSnapshot(
             mainSheet,
@@ -1493,7 +1665,8 @@ if (
     action !== "snapshot" &&
     action !== "snapshot_targets" &&
     action !== "inspect_changes" &&
-    action !== "apply_changes"
+    action !== "apply_changes" &&
+    action !== "headers_preview" && action !== "headers_apply" && action !== "organize"
 ) {
     throw new Error("不支持的操作：" + action);
 }
@@ -1513,6 +1686,37 @@ if (sheetName === "" || detailSheetName === "") {
 
 const targetSheet = findTargetSheet(sheetName);
 const detailSheet = findTargetSheet(detailSheetName);
+if (action === "headers_preview" || action === "headers_apply") {
+    const definitions = Object.assign({ shop: ["店铺"] }, MAIN_FIELD_DEFINITIONS, { note: ["备注"] });
+    const plans = [headerPlan(targetSheet, definitions), headerPlan(detailSheet, DETAIL_FIELD_DEFINITIONS)];
+    const snapshots = [headerSnapshot(targetSheet), headerSnapshot(detailSheet)];
+    if (action === "headers_apply") {
+        if (!sameComparable(snapshots, argv.preconditions)) throw new Error("表头在预览后已变化，请重新检查");
+        [targetSheet, detailSheet].forEach(function (sheet, index) {
+            plans[index].additions.forEach(function (item) { sheet.Range(columnNumberToName(item.column) + "1").Value2 = item.header; });
+        });
+        const mainCols = findColumnsByDefinitions(targetSheet, MAIN_FIELD_DEFINITIONS, sheetName);
+        const detailCols = findColumnsByDefinitions(detailSheet, DETAIL_FIELD_DEFINITIONS, detailSheetName);
+        HIDDEN_DETAIL_FIELDS.forEach(function (field) {
+            detailSheet.Range(detailCols[field].columnLetter + "1").EntireColumn.Hidden = true;
+        });
+        detailSheet.Range(detailCols.event_type.columnLetter + "1").Value2 = "轨迹类型";
+        const last = lastUsedRow(targetSheet, sheetName);
+        if (last > 1) applyMainFormats(targetSheet, mainCols, [{ start: 2, end: last }]);
+        const detailLast = lastUsedRow(detailSheet, detailSheetName);
+        if (detailLast > 1) applyDetailFormats(detailSheet, detailCols, 2, detailLast);
+        targetSheet.Range(mainCols.route.columnLetter + "1:" + mainCols.route.columnLetter + Math.max(2, last)).WrapText = true;
+        detailSheet.Range(detailCols.content.columnLetter + "1:" + detailCols.content.columnLetter + Math.max(2, detailLast)).WrapText = true;
+    }
+    return returnResult({ success: true, schemaVersion: SCHEMA_VERSION, plans: plans, snapshots: snapshots });
+}
+if (action === "snapshot_targets" && Array.isArray(argv.targets) && argv.targets.every(function (item) { return item.targetType === "tracking_headers"; })) {
+    return returnResult({ success: true, schemaVersion: SCHEMA_VERSION, snapshots: argv.targets.map(function (item) {
+        if (item.sheetName === targetSheet.Name) return headerSnapshot(targetSheet);
+        if (item.sheetName === detailSheet.Name) return headerSnapshot(detailSheet);
+        throw new Error("表头快照不属于当前站点");
+    }) });
+}
 const columns = findColumnsByDefinitions(
     targetSheet,
     MAIN_FIELD_DEFINITIONS,
@@ -1568,7 +1772,7 @@ if (action === "snapshot_targets") {
         lastUsedRow(detailSheet, detailSheet.Name)
     );
     const snapshots = targets.map(function (target) {
-        return currentTrackingSnapshot(
+        const current = currentTrackingSnapshot(
             targetSheet,
             columns,
             detailSheet,
@@ -1577,6 +1781,8 @@ if (action === "snapshot_targets") {
             mainRows,
             detailRows
         );
+        if (target.targetType === "tracking_inputs" && !sameComparable(current.comparableValue, target.comparableValue)) throw new Error("主表FBA顺序或货代已变化，请核对本次操作");
+        return current;
     });
     const targetResult = Object.assign(baseResult, { snapshots: snapshots });
     return returnResult(targetResult);
@@ -1623,16 +1829,10 @@ if (action === "list_pending") {
             total: 0,
             offset: offset,
             nextOffset: offset,
-            hasMore: false
+            hasMore: false,
+            inputGuard: inputSnapshot(targetSheet, columns)
         });
     }
-    // WPS会把日期保存为Excel序号；统一显示格式，兼容升级前已写入的历史行。
-    applyMainFormats(
-        targetSheet,
-        columns,
-        [{ start: 2, end: lastRow }]
-    );
-
     const allFbaValues = singleColumnValues(
         targetSheet.Range(
             columns.fba.columnLetter + "2:" + columns.fba.columnLetter + lastRow
@@ -1651,12 +1851,14 @@ if (action === "list_pending") {
         ).Value2
     );
     const pending = [];
+    let completionPending = false;
     const seen = Object.create(null);
     for (let index = 0; index < allFbaValues.length; index++) {
         const fba = normalizeFba(allFbaValues[index]);
         const completed = normalizeText(completionValues[index]).toLowerCase();
+        if (isValidFba(fba) && displayText(scalarValue(targetSheet.Range(columns.signed_time.columnLetter + (index + 2)))) !== "" && completed !== "是") completionPending = true;
         // 一键更新严格只查询“是否完成”为空的记录；任何非空状态都完全跳过。
-        if (!isValidFba(fba) || completed !== "") {
+        if (!isValidFba(fba) || completed !== "" || displayText(scalarValue(targetSheet.Range(columns.signed_time.columnLetter + (index + 2)))) !== "") {
             continue;
         }
         if (!seen[fba]) {
@@ -1674,7 +1876,9 @@ if (action === "list_pending") {
         total: pending.length,
         offset: offset,
         nextOffset: nextOffset,
-        hasMore: nextOffset < pending.length
+        hasMore: nextOffset < pending.length,
+        inputGuard: inputSnapshot(targetSheet, columns),
+        completionPending: completionPending
     });
 }
 
@@ -1700,13 +1904,15 @@ const conflicts = [];
 const updatedCells = [];
 const formatFailures = [];
 
+// 调用方已持久化签收/完成单元格快照，并在上方校验全部主表输入。
+completeSignedRows(targetSheet, columns, updated, updatedCells);
+
 if (items.length === 0) {
     let detailRowsRemoved = 0;
-    if (action === "sync_tracking") {
-        detailRowsRemoved = removeInactiveDetailRows(
+    if (action === "sync_tracking" || action === "organize") {
+        detailRowsRemoved = organizeDetails(
             targetSheet,
             columns,
-            lastRow,
             detailSheet,
             detailColumns
         );
@@ -1724,7 +1930,9 @@ if (items.length === 0) {
         eventsAdded: 0,
         eventsUpdated: 0,
         eventsUnchanged: 0,
-        detailRowsRemoved: detailRowsRemoved
+        detailRowsRemoved: detailRowsRemoved,
+        inputGuard: inputSnapshot(targetSheet, columns),
+        detailGuard: tableSnapshot(detailSheet)
     });
 }
 
@@ -1786,6 +1994,8 @@ for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 
     for (let fieldIndex = 0; fieldIndex < MAIN_VALUE_FIELDS.length; fieldIndex++) {
         const field = MAIN_VALUE_FIELDS[fieldIndex];
+        // 完成状态在签收单元格实际写入成功后生成，不能使用请求中的状态。
+        if (field === "completion") continue;
         const incoming = displayText(main[field]);
         const column = columns[field];
         const currentRaw = (
@@ -1795,12 +2005,15 @@ for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
         const comparableIncoming = comparableMainValue(field, incoming);
         const comparableCurrent = comparableMainValue(field, currentRaw);
 
-        if (incoming === "" && !CLEARABLE_FIELDS[field]) {
+        const planNames = { estimated_departure: "预计出发", estimated_arrival: "预计到达", estimated_delivery: "预计送达" };
+        const cancelled = displayText(main.cancelled_plans).split("|").indexOf(planNames[field]) >= 0 && !!planNames[field];
+        if (incoming === "" && !CLEARABLE_FIELDS[field] && !cancelled) {
             continue;
         }
         if (comparableCurrent === comparableIncoming) {
             continue;
         }
+        if (field === "signed_time" && current !== "") continue;
         if (PROTECTED_ACTUAL_FIELDS[field] && current !== "" && incoming !== "") {
             conflicts.push(fba + "：" + MAIN_FIELD_LABELS[field]);
             continue;
@@ -1851,6 +2064,7 @@ for (let fieldIndex = 0; fieldIndex < writeFields.length; fieldIndex++) {
     );
 }
 // 无论查询服务内部如何并发，明细都按主表实际行号排列。
+completeSignedRows(targetSheet, columns, updated, updatedCells);
 acceptedItems.sort(function (left, right) {
     return left.row - right.row;
 });
@@ -1870,7 +2084,7 @@ for (let index = 0; index < stateFbas.length; index++) {
         pushUnique(failures, fba);
     }
     if (state.businessWritten) {
-        updated.push(fba);
+        pushUnique(updated, fba);
     } else if (state.auditWritten && !state.failed) {
         auditOnly.push(fba);
     } else if (!state.failed) {
@@ -1904,10 +2118,9 @@ if (action === "sync_tracking") {
         );
     }
     try {
-        detailRowsRemoved = removeInactiveDetailRows(
+        if (argv.defer_organize !== true) detailRowsRemoved = organizeDetails(
             targetSheet,
             columns,
-            lastRow,
             detailSheet,
             detailColumns
         );
@@ -1933,7 +2146,9 @@ const result = Object.assign(baseResult, {
     eventsAdded: eventSummary.added,
     eventsUpdated: eventSummary.updated,
     eventsUnchanged: eventSummary.unchanged,
-    detailRowsRemoved: detailRowsRemoved
+    detailRowsRemoved: detailRowsRemoved,
+    detailGuard: tableSnapshot(detailSheet),
+    inputGuard: inputSnapshot(targetSheet, columns)
 });
 
 return returnResult(result);

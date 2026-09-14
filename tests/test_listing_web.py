@@ -20,6 +20,47 @@ def csrf_from(response) -> str:
     return match.group(1)
 
 
+def test_recalculate_is_guarded_idempotent_and_has_read_only_details(tmp_path, monkeypatch):
+    app = create_app(tmp_path / "data")
+    with TestClient(app) as client:
+        csrf = bootstrap_and_login(client)
+        account = app.state.users.list_users()[0]
+        database = ProjectDatabase(tmp_path / "data" / "app.db", account.id)
+        shop = database.save_shop("测试", AirScriptConfig("https://www.kdocs.cn/l/share", "https://www.kdocs.cn/api/v3/ide/file/f/script/logistics/sync_task", "token"))
+        database.save_listing_connection(shop.id, "https://www.kdocs.cn/api/v3/ide/file/f/script/listing/sync_task", "token")
+        country = database.save_shop_country(shop.id, "美国", "US-Listing")
+        state = {"value": 12, "writes": 0}
+
+        def snapshot():
+            return [{"targetType": "cell", "sheetName": "US-Listing", "matchHeader": "MSKU", "matchValue": "SKU-1", "itemKey": "SKU-1", "field": "final_monthly_sales", "cellAddress": "AN2", "value": state["value"]}]
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs): pass
+            def forecast_plan(self):
+                return {"snapshots": snapshot(), "pages": [{"entries": [{"msku": "SKU-1", "detail": {"monthly": 30}}]}]}
+            def apply_forecast_plan(self, plan):
+                state["writes"] += 1
+                state["value"] = 30
+                return {"updated": 1}
+            def snapshot_targets(self, targets): return snapshot()
+
+        monkeypatch.setattr("g_team_ops.modules.inventory.router.ListingAirScriptClient", FakeClient)
+        base = f"/api/inventory/countries/{country.id}/forecast"
+        body = {"shop_id": shop.id}
+        assert client.post(base + "/recalculate", json=body).status_code == 403
+        details = client.post(base + "/details", json=body, headers={"X-CSRF-Token": csrf})
+        assert details.status_code == 200
+        assert state["writes"] == 0
+        headers = {"X-CSRF-Token": csrf, "Idempotency-Key": "test-recalculate-once"}
+        first = client.post(base + "/recalculate", json=body, headers=headers)
+        assert first.status_code == 200, first.text
+        second = client.post(base + "/recalculate", json=body, headers=headers)
+        assert second.status_code == 200, second.text
+        assert state["writes"] == 1
+        assert first.json()["operation"]["id"] == second.json()["operation"]["id"]
+        assert client.post(base + "/recalculate", json={"shop_id": "foreign-shop"}, headers=headers).json()["ok"] is False
+
+
 def bootstrap_and_login(client: TestClient):
     setup = client.get("/setup")
     client.post(

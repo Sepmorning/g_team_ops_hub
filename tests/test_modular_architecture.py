@@ -4,6 +4,10 @@ from fastapi.testclient import TestClient
 
 
 EXPECTED_HTTP_ROUTES = {
+    ("POST", "/api/inventory/countries/{country_id}/forecast/details"),
+    ("POST", "/api/inventory/countries/{country_id}/forecast/recalculate"),
+    ("POST", "/api/inventory/countries/{country_id}/forecast/details"),
+    ("POST", "/api/inventory/countries/{country_id}/forecast/recalculate"),
     ("GET", "/health"),
     ("GET", "/"),
     ("GET", "/setup"),
@@ -39,6 +43,8 @@ EXPECTED_HTTP_ROUTES = {
     ("POST", "/api/shops/{shop_id}/discover-sites"),
     ("GET", "/tracking"),
     ("POST", "/api/tracking/query"),
+    ("POST", "/api/tracking/headers/preview"),
+    ("POST", "/api/tracking/headers/apply"),
     ("POST", "/api/shops/{shop_id}/tracking-sync"),
     ("GET", "/inventory"),
     ("GET", "/api/inventory/config"),

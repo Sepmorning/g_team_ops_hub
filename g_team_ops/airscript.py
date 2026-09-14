@@ -21,7 +21,7 @@ DEFAULT_DETAIL_SHEET_NAME = "US-轨迹明细"
 AIRSCRIPT_WRITE_BATCH_SIZE = 50
 AIRSCRIPT_RICH_WRITE_BATCH_SIZE = 10
 AIRSCRIPT_CHANGE_BATCH_SIZE = 300
-REQUIRED_AIRSCRIPT_SCHEMA_VERSION = 11
+REQUIRED_AIRSCRIPT_SCHEMA_VERSION = 13
 
 
 def parse_share_file_id(share_url: str) -> str:
@@ -249,13 +249,24 @@ class AirScriptClient:
         }
         if arguments:
             argv.update(arguments)
+        if isinstance(argv.get("preconditions"), list):
+            # v11 compares JSON text. Remote serialization can reorder object keys;
+            # let its existing expectedComparable() rebuild row values in the same
+            # field order as the current row. Keep the raw snapshot and all guards.
+            argv["preconditions"] = [
+                {key: value for key, value in target.items() if key != "comparableValue"}
+                if isinstance(target, dict) and target.get("targetType") == "row" and "value" in target
+                else target
+                for target in argv["preconditions"]
+            ]
         return execute_airscript_request(
             session=self.session,
             webhook_url=self.config.webhook_url,
             api_token=self.config.api_token,
             argv=argv,
             timeout=self.timeout,
-            retries=self.retries,
+            # A lost response does not prove that a write did not happen.
+            retries=0 if action in {"sync", "sync_tracking", "organize", "headers_apply", "apply_changes"} else self.retries,
             service_name="AirScript",
             required_schema_version=REQUIRED_AIRSCRIPT_SCHEMA_VERSION,
             upgrade_message=(
@@ -331,6 +342,8 @@ class AirScriptClient:
         offset = 0
         values: list[PendingTrackingItem] = []
         seen: set[str] = set()
+        self.pending_input_guard = None
+        self.completion_pending = False
         for _page in range(100):
             result = self._execute(
                 "list_pending",
@@ -338,6 +351,12 @@ class AirScriptClient:
                 {"offset": offset, "limit": page_size},
             )
             page = result.get("fbas")
+            guard = result.get("inputGuard")
+            self.completion_pending = self.completion_pending or result.get("completionPending") is True
+            if isinstance(guard, dict):
+                if self.pending_input_guard is not None and self.pending_input_guard != guard:
+                    raise ResponseError("读取期间主表FBA、货代或完成状态已变化，请重新查询")
+                self.pending_input_guard = guard
             if not isinstance(page, list):
                 raise ResponseError("AirScript待读取结果缺少FBA列表")
             for item in page:
@@ -384,7 +403,7 @@ class AirScriptClient:
         return items
 
     def snapshot_tracking_results(
-        self, results: list[TrackingResult]
+        self, results: list[TrackingResult], expected_inputs: dict | None = None,
     ) -> list[dict[str, Any]]:
         items = self._tracking_items(results)
         rich = any("main" in item for item in items)
@@ -408,7 +427,20 @@ class AirScriptClient:
                 if key not in seen:
                     seen.add(key)
                     snapshots.append(item)
+        if expected_inputs is not None:
+            actual = next((item for item in snapshots if item.get("targetType") == "tracking_inputs"), None)
+            if actual is None or actual.get("value") != expected_inputs.get("value"):
+                raise ResponseError("查询期间主表FBA顺序、货代或完成状态已变化；未开始写入，请重新查询")
+        if any(item.get("targetType") == "tracking_table" for item in snapshots):
+            # The complete image already covers every detail row, including later batches.
+            snapshots = [item for item in snapshots if item.get("targetType") != "row"]
         return snapshots
+
+    def preview_headers(self) -> dict[str, Any]:
+        return self._execute("headers_preview", [])
+
+    def apply_headers(self, snapshots: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._execute("headers_apply", [], {"preconditions": snapshots})
 
     def snapshot_targets(
         self, targets: list[dict[str, Any]]
@@ -483,12 +515,16 @@ class AirScriptClient:
             summary.detail_rows_removed += int(
                 result.get("detailRowsRemoved") or 0
             )
+            summary.updated.extend(_string_list(result.get("updated")))
+            summary.updated_cells.extend(_cell_change_list(result.get("updatedCells")))
             return summary
         rich = any("main" in item for item in items)
         write_batch_size = (
             AIRSCRIPT_RICH_WRITE_BATCH_SIZE if rich else AIRSCRIPT_WRITE_BATCH_SIZE
         )
         action = "sync_tracking" if rich else "sync"
+        detail_guard = next((item for item in (preconditions or []) if item.get("targetType") == "tracking_table"), None)
+        input_guard = next((item for item in (preconditions or []) if item.get("targetType") == "tracking_inputs"), None)
         # 富轨迹包含多条明细事件，使用更小批次避免WPS脚本负载过大。
         for offset in range(0, len(items), write_batch_size):
             batch = items[offset : offset + write_batch_size]
@@ -499,12 +535,26 @@ class AirScriptClient:
                 if str(item.get("itemKey") or "").upper() in batch_keys
                 or (offset == 0 and str(item.get("reason") or "") == "cleanup")
             ]
+            if input_guard is not None:
+                batch_preconditions.append(input_guard)
+            if detail_guard is not None:
+                batch_preconditions.append(detail_guard)
             try:
                 result = self._execute(
                     action,
                     batch,
-                    {"preconditions": batch_preconditions},
+                    {"preconditions": batch_preconditions, "defer_organize": True},
                 )
+                if input_guard is not None:
+                    guard = result.get("inputGuard")
+                    if not isinstance(guard, dict) or guard.get("targetType") != "tracking_inputs":
+                        raise ResponseError("写入后缺少主表保护快照，请到操作历史核对")
+                    input_guard = guard
+                if detail_guard is not None:
+                    guard = result.get("detailGuard")
+                    if not isinstance(guard, dict) or guard.get("targetType") != "tracking_table":
+                        raise ResponseError("写入后缺少明细保护快照，请到操作历史核对")
+                    detail_guard = guard
             except CarrierError as exc:
                 batch_number = offset // write_batch_size + 1
                 total_batches = (
@@ -512,7 +562,7 @@ class AirScriptClient:
                 ) // write_batch_size
                 raise type(exc)(
                     f"AirScript第 {batch_number}/{total_batches} 批回填失败；"
-                    f"此前已处理 {offset} 条。可重新查询安全补写：{exc.user_message}"
+                    f"此前已处理 {offset} 条，本批可能已写入；请先在操作历史核对实际差异：{exc.user_message}"
                 ) from exc
             summary.updated.extend(_string_list(result.get("updated")))
             summary.audit_only.extend(_string_list(result.get("auditOnly")))
@@ -533,4 +583,10 @@ class AirScriptClient:
             summary.detail_rows_removed += int(
                 result.get("detailRowsRemoved") or 0
             )
+        if rich:
+            organize_guards = [input_guard] if input_guard is not None else []
+            if detail_guard is not None:
+                organize_guards.append(detail_guard)
+            organized = self._execute("organize", [], {"preconditions": organize_guards})
+            summary.detail_rows_removed += int(organized.get("detailRowsRemoved") or 0)
         return summary

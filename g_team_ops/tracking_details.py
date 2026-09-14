@@ -8,7 +8,7 @@ from typing import Any, Iterable
 from .models import TrackingDetails, TrackingEvent, TrackingSnapshot
 
 
-TRACKING_SCHEMA_VERSION = 4
+TRACKING_SCHEMA_VERSION = 5
 
 _DATE_TOKEN = re.compile(
     r"(?:(?P<year>20\d{2})(?:[./-]|年))?"
@@ -139,7 +139,7 @@ def _extract_plans(content: str, event_time: str) -> dict[str, str]:
     )
     eta = _date_after_label(
         content,
-        r"ETA|预计(?:到港|抵达|到达|落地|到站)|到港时间",
+        r"ETA|预计(?:到港|抵达|到达|落地|到站)",
         event_time,
     )
     delivery = _date_after_label(
@@ -168,7 +168,7 @@ def _extract_plans(content: str, event_time: str) -> dict[str, str]:
             r"送仓|派送|送达|签收",
             event_time,
         )
-    if not delivery and any(word in content for word in ("送仓", "送达")):
+    if not delivery and re.search(r"(?:提前|改期|调整|改约).*(?:送仓|送达)", content) and not re.search(r"已送达|已签收|送仓完成", content):
         match = _DATE_TOKEN.search(content)
         if match:
             delivery = _normalized_date_token(match.group(0), event_time)
@@ -213,15 +213,38 @@ def _is_estimate(content: str) -> bool:
 
 
 def _classify(content: str) -> tuple[str, str, bool]:
+    # A route can say both “已开船” and “预计到港”. Classify each clause,
+    # preferring an actual milestone over a plan in the same route.
+    clauses = [part.strip() for part in re.split(r"[，,。；;]|\s+-\s+", content) if part.strip()]
+    classified = [_classify_clause(part) for part in clauses]
+    return next((item for item in classified if item[2]), next(
+        (item for item in classified if item[0] != "其他"), ("其他", "其他", False)
+    ))
+
+
+def _pod_provided(content: str) -> bool:
+    return bool(re.search(r"(?:已上传|已提供|已回传)\s*POD|POD\s*(?:已上传|已提供|已回传)", content, re.I))
+
+
+def _classify_clause(content: str) -> tuple[str, str, bool]:
     value = content.replace(" ", "")
     upper = value.upper()
+
+    if _is_estimate(value):
+        if any(word in value for word in ("送仓", "派送", "送达", "签收")):
+            return "末端配送", "预约派送", False
+        return "其他", "其他", False
+    if re.search(r"未签收|未送达|未开船|未到港|未提货|未派送|晚到港|等待|待开船|待提柜|待卸|待拆", value):
+        return "其他", "其他", False
 
     if any(word in value for word in ("已签收", "签收完成", "已送达")) or (
         value in {"签收", "送达"}
     ):
         return "完成", "签收", True
-    if "POD" in upper:
+    if _pod_provided(value):
         return "完成", "POD", True
+    if "POD" in upper:
+        return "其他", "POD待提供", False
     if any(word in value for word in ("货物已提取", "货物提取")):
         return "末端配送", "货物提取", True
     if any(
@@ -229,7 +252,7 @@ def _classify(content: str) -> tuple[str, str, bool]:
         for word in ("递交快递服务商", "递交快递", "递交末端承运商")
     ):
         return "末端配送", "递交末端承运商", True
-    if "派送中" in value and "预约" not in value:
+    if re.search(r"派送中(?!断)|已开始派送|已派送|已出车派送", value):
         return "末端配送", "派送中", True
     if any(word in value for word in ("预约派送", "预约送仓", "计划送仓")):
         return "末端配送", "预约派送", False
@@ -247,7 +270,7 @@ def _classify(content: str) -> tuple[str, str, bool]:
         word in value
         for word in ("已到港", "已到目的港", "到达目的港", "已抵港")
     ) or (
-        "到港" in value and not _is_estimate(value)
+        value in {"到港", "抵港", "到达目的港"}
     ):
         return "干线运输", "实际到达", True
     if "清关" in value:
@@ -264,8 +287,7 @@ def _classify(content: str) -> tuple[str, str, bool]:
     if any(
         word in value for word in ("已开船", "已离港", "已起飞", "已发车")
     ) or (
-        any(word in value for word in ("开船", "起飞", "发车"))
-        and not _is_estimate(value)
+        value in {"开船", "起飞", "发车", "离港"}
     ):
         return "干线运输", "实际出发", True
     if any(word in value for word in ("航行中", "运输中", "中转", "二程")):
@@ -322,9 +344,54 @@ def _event_type(
         values.append("异常")
     elif _is_recovery(content):
         values.append("恢复")
-    if attachment or "POD" in content.upper():
+    if attachment or _pod_provided(content):
         values.append("附件")
     return "/".join(dict.fromkeys(values)) or "信息"
+
+
+def _cancelled_targets(content: str) -> set[str]:
+    content = re.sub(r"(?:未|没有|无需|尚未)取消", "", content)
+    if not re.search(r"取消|作废", content):
+        return set()
+    targets = set()
+    for words, target in ((r"船期|开船|航班|起飞|出发|ETD", "预计出发"),
+                          (r"到港|到达|ETA", "预计到达"),
+                          (r"送仓|派送|送达|预约", "预计送达")):
+        if re.search(words, content, re.I):
+            targets.add(target)
+    return targets
+
+
+def _exception_changes(content: str, phase: str) -> tuple[set[str], set[str]]:
+    """Resolve only the named exception family; a release cannot resolve loss."""
+    opened, resolved = set(), set()
+    for clause in re.split(r"[，,。；;]", content):
+        categories = set()
+        customs = "进口查验" if re.search(r"进口|目的港|清关", clause) or phase in {"目的地处理", "末端配送", "完成"} else "出口查验"
+        for pattern, category in ((r"查验|扣关|未放行|放行|报关|清关", customs),
+                                  (r"甩柜|船期|换船|航班", "班次异常"),
+                                  (r"预约|派送|送仓", "派送异常"),
+                                  (r"丢失|短少|丢件", "丢失短少"),
+                                  (r"破损|货损", "货损"),
+                                  (r"退件|退回", "退件")):
+            if re.search(pattern, clause):
+                categories.add(category)
+        explicit_recovery = bool(re.search(r"查验(?:完成|完毕)|已放行|报关放行|清关放行|异常(?:已)?解除|恢复正常|已找回|预约成功|重新预约成功", clause))
+        if re.search(r"未放行|待放行|暂未|尚未|未解除", clause):
+            explicit_recovery = False
+        if explicit_recovery:
+            resolved.update(categories)
+        elif re.search(r"查验|扣关|未放行|甩柜|取消|延误|异常|丢失|短少|破损|货损|退件|预约失败|未拿约|DR监控", clause, re.I):
+            opened.update(categories or {"其他异常"})
+    for clause in re.split(r"[，,。；;]", content):
+        _, node, actual = _classify_clause(clause)
+        if actual and node == "实际出发":
+            resolved.update({"出口查验", "班次异常"})
+        if actual and node == "提柜":
+            resolved.add("进口查验")
+        if actual and node == "签收":
+            resolved.add("派送异常")
+    return opened, resolved
 
 
 def _event_id(
@@ -427,50 +494,74 @@ def normalize_tracking_details(
     raw.sort(key=lambda item: item["event_time"])
     parsed: list[dict[str, Any]] = []
     latest_plan_event: dict[str, int] = {}
+    cancelled_plans: set[str] = set()
+    active_exceptions: dict[str, int] = {}
+    known_phase = "其他"
 
     for item in raw:
         content = " ".join(
             part for part in (item["content"], item["remark"]) if part
         ).strip()
         phase, node, actual = _classify(content)
-        plans = _extract_plans(content, item["event_time"])
+        if phase != "其他":
+            known_phase = phase
+        plans = {}
+        for clause in re.split(r"[，,。；;]", content):
+            if not re.search(r"取消|作废", clause):
+                plans.update(_extract_plans(clause, item["event_time"]))
+        cancelled = _cancelled_targets(content)
+        for target in cancelled:
+            previous = latest_plan_event.pop(target, None)
+            if previous is not None:
+                parsed[previous]["invalidated_plans"].add(target)
+                parsed[previous]["cancelled_plans"].add(target)
+            cancelled_plans.add(target)
+        opened, resolved = _exception_changes(content, known_phase)
+        for category in resolved:
+            active_exceptions.pop(category, None)
+        for category in opened:
+            active_exceptions[category] = len(parsed)
         event = {
             **item,
             "content": content,
-            "phase": phase,
+            "phase": phase if phase != "其他" else known_phase,
             "node": node,
             "actual": actual,
             "plans": plans,
-            "validity": "已取消" if "取消" in content else "当前有效",
+            "validity": "已取消" if cancelled and not plans else "当前有效",
             "invalidated_plans": set(),
+            "cancelled_plans": set(),
+            "opened_exceptions": opened,
             "exception_status": (
                 "异常中"
-                if _is_exception(content)
+                if opened
                 else "已恢复"
-                if _is_recovery(content)
+                if resolved
                 else "无异常"
             ),
             "transport_info": _transport_info(content),
         }
         parsed.append(event)
-        if event["validity"] != "已取消":
-            for target in plans:
-                previous = latest_plan_event.get(target)
-                if previous is not None:
-                    parsed[previous]["invalidated_plans"].add(target)
-                latest_plan_event[target] = len(parsed) - 1
+        for target in plans:
+            previous = latest_plan_event.get(target)
+            if previous is not None:
+                parsed[previous]["invalidated_plans"].add(target)
+            latest_plan_event[target] = len(parsed) - 1
+            cancelled_plans.discard(target)
 
     for item in parsed:
         if item["validity"] == "已取消" or not item["plans"]:
             continue
         invalidated_count = len(item["invalidated_plans"])
         if invalidated_count == len(item["plans"]):
-            item["validity"] = "已被更新"
+            item["validity"] = "已取消" if item["cancelled_plans"] == set(item["plans"]) else "已被更新"
         elif invalidated_count:
             item["validity"] = "部分已更新"
 
     events: list[TrackingEvent] = []
-    for item in parsed:
+    for index, item in enumerate(parsed):
+        if item["opened_exceptions"] and index not in active_exceptions.values():
+            item["exception_status"] = "已恢复或由后续记录更新"
         events.append(
             TrackingEvent(
                 event_id=_event_id(
@@ -505,15 +596,9 @@ def normalize_tracking_details(
         )
 
     latest = parsed[-1] if parsed else {}
-    active_exception = ""
-    for item in parsed:
-        if _is_exception(item["content"]):
-            active_exception = item["content"]
-        elif active_exception and (
-            _is_recovery(item["content"])
-            or item["node"] in {"实际出发", "实际到达", "提柜", "签收", "POD"}
-        ):
-            active_exception = ""
+    active_exception = "；".join(dict.fromkeys(
+        parsed[index]["content"] for index in active_exceptions.values()
+    ))
 
     latest_plans = {
         target: parsed[index]["plans"][target]
@@ -527,7 +612,7 @@ def normalize_tracking_details(
             break
 
     pickup_event = _first_actual(
-        parsed, {"接收"}, {"入仓/接收", "提货"}
+        parsed, {"接收"}, {"提货"}
     )
     departure_event = _first_actual(
         parsed, {"干线运输"}, {"实际出发"}
@@ -535,31 +620,16 @@ def normalize_tracking_details(
     arrival_event = _first_actual(
         parsed, {"干线运输"}, {"实际到达"}
     )
-    # “提取派送”用于业务侧判断货物最近一次真正开始派送的日期。
-    # 预约可能取消、提前或推后，因此只要存在实际“派送中”，就采用
-    # 时间线上最后一次“派送中”；没有该节点时才沿用原有末端节点兜底。
-    last_mile_event = _last_actual(
+    # 首次实际派送。提柜、入海外仓、预约和递交承运商不等于已派送。
+    last_mile_event = _first_actual(
         parsed,
         {"末端配送"},
         {"派送中"},
-    ) or _first_actual(
-        parsed,
-        {"目的地处理", "末端配送"},
-        {"提柜", "货物提取", "递交末端承运商"},
     )
-    if not last_mile_event:
-        # 超鸿等货代不提供提柜/递交节点时，“已入海外仓”已经能够证明
-        # 货物完成港后提取并进入末端链路，作为保守的提取派送时间。
-        last_mile_event = _first_actual(
-            parsed,
-            {"目的地处理"},
-            {"目的仓入库"},
-        )
     signed_event = _first_actual(parsed, {"完成"}, {"签收"})
     pod_present = any(
-        event.attachment
-        or event.node == "POD"
-        or "POD" in event.content.upper()
+        _pod_provided(event.content)
+        or (event.attachment and "POD" in event.content.upper() and not re.search(r"未提供|未上传|未回传", event.content))
         for event in events
     )
 
@@ -573,28 +643,28 @@ def normalize_tracking_details(
         pickup_time=pickup_event or date_only(structured.get("pickup_time")),
         estimated_departure=(
             latest_plans.get("预计出发")
-            or date_only(structured.get("estimated_departure"))
+            or ("" if "预计出发" in cancelled_plans else date_only(structured.get("estimated_departure")))
         ),
         actual_departure=(
             date_only(structured.get("actual_departure")) or departure_event
         ),
         estimated_arrival=(
             latest_plans.get("预计到达")
-            or date_only(structured.get("estimated_arrival"))
+            or ("" if "预计到达" in cancelled_plans else date_only(structured.get("estimated_arrival")))
         ),
         actual_arrival=(
             date_only(structured.get("actual_arrival")) or arrival_event
         ),
         estimated_delivery=(
             latest_plans.get("预计送达")
-            or date_only(structured.get("estimated_delivery"))
+            or ("" if "预计送达" in cancelled_plans else date_only(structured.get("estimated_delivery")))
         ),
-        last_mile_time=last_mile_event
-        or date_only(structured.get("last_mile_time")),
+        last_mile_time=last_mile_event,
         signed_time=date_only(structured.get("signed_time")) or signed_event,
         pod_status="已提供" if pod_present else "未提供",
-        data_status="正常" if parsed else "信息不足",
+        data_status=("计划待更新：" + "、".join(sorted(cancelled_plans))) if cancelled_plans else ("正常" if parsed else "信息不足"),
         updated_time=now,
+        cancelled_plans="|".join(sorted(cancelled_plans)),
     )
     return TrackingDetails(snapshot=snapshot, events=tuple(events))
 

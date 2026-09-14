@@ -5,6 +5,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 
 from ..airscript import (
     AirScriptClient,
@@ -24,7 +25,6 @@ from ..yitong import CaptchaChallenge, YiTongClient, YiTongQueryService
 from ..tracking_details import (
     TRACKING_SCHEMA_VERSION,
     current_time_text,
-    minimal_tracking_details,
 )
 
 
@@ -32,6 +32,7 @@ logger = logging.getLogger("g_team_ops.web.services")
 CAPTCHA_TTL_SECONDS = 5 * 60
 VALIDATED_CLIENT_TTL_SECONDS = 30
 CARRIER_STATUS_SNAPSHOT_TTL_SECONDS = 10 * 60
+TRACKING_DETAIL_CACHE_TTL_SECONDS = 6 * 60 * 60
 CARRIER_DEFINITIONS = {
     "anda": ("安达", "安达"),
     "chaohong": ("超鸿", "超鸿"),
@@ -611,7 +612,12 @@ class QueryCoordinator:
             ):
                 try:
                     details = TrackingDetails.from_dict(cached[3])
-                    cache_hits += 1
+                    fetched_at = datetime.fromisoformat(details.snapshot.updated_time).astimezone()
+                    age = (datetime.now().astimezone() - fetched_at).total_seconds()
+                    if not 0 <= age < TRACKING_DETAIL_CACHE_TTL_SECONDS:
+                        details = None
+                    else:
+                        cache_hits += 1
                 except (TypeError, ValueError):
                     details = None
 
@@ -622,6 +628,8 @@ class QueryCoordinator:
                     try:
                         details = fetch(result.fba)
                         detail_fetches += 1
+                        if not details.events:
+                            raise ValueError("完整轨迹为空")
                         database.save_tracking_cache(
                             carrier_key,
                             result.fba,
@@ -631,6 +639,7 @@ class QueryCoordinator:
                             details.to_dict(),
                         )
                     except (CarrierError, ValueError) as exc:
+                        details = None
                         detail_failures += 1
                         logger.warning(
                             "tracking_detail_fetch_failed carrier=%s category=%s message=%s",
@@ -639,6 +648,7 @@ class QueryCoordinator:
                             getattr(exc, "user_message", str(exc)),
                         )
                     except Exception:
+                        details = None
                         detail_failures += 1
                         logger.exception(
                             "tracking_detail_fetch_unexpected carrier=%s",
@@ -646,12 +656,20 @@ class QueryCoordinator:
                         )
 
             if details is None:
-                details = minimal_tracking_details(
-                    result.fba,
-                    result.carrier,
-                    result.latest_time,
-                    result.latest_event,
-                )
+                enriched.append(replace(
+                    result, status=QueryStatus.PARTIAL,
+                    error_category="tracking_detail_incomplete",
+                    error_message="订单列表已查到，但完整轨迹获取失败；保留共享表原值，本次不回填该FBA",
+                ))
+                continue
+
+            if not details.events:
+                enriched.append(replace(
+                    result, status=QueryStatus.PARTIAL,
+                    error_category="tracking_detail_incomplete",
+                    error_message="完整轨迹为空；保留共享表原值，本次不回填该FBA",
+                ))
+                continue
 
             snapshot = replace(details.snapshot, updated_time=now)
             primary_key = primary_carriers.get(result.fba)
@@ -668,6 +686,8 @@ class QueryCoordinator:
                     result,
                     snapshot=snapshot,
                     events=details.events,
+                    latest_time=snapshot.latest_time,
+                    latest_event=snapshot.latest_event,
                 )
             )
 

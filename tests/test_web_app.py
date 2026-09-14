@@ -66,6 +66,36 @@ def test_web_setup_login_and_private_pages(tmp_path):
         assert "账号管理" in client.get("/admin").text
 
 
+def test_tracking_header_endpoints_require_csrf_and_owned_shop(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    app = create_app(data_dir)
+    with TestClient(app) as client:
+        csrf = bootstrap_and_login(client)
+        account = app.state.users.list_users()[0]
+        database = ProjectDatabase(data_dir / "app.db", account.id)
+        shop = database.save_shop("测试店铺", AirScriptConfig(
+            "https://www.kdocs.cn/l/store", "https://www.kdocs.cn/api/v3/ide/file/f/script/s/sync_task", "test-token"))
+        site = database.save_shop_country(shop.id, "美国", "测试-美国", country_code="US",
+            fba_sheet_name="US-FBA", detail_sheet_name="US-轨迹明细")
+        calls = []
+        class FakeClient:
+            def __init__(self, config, retries=0):
+                pass
+            def preview_headers(self):
+                calls.append("preview")
+                return {"plans": [], "snapshots": []}
+        monkeypatch.setattr("g_team_ops.modules.tracking.router.AirScriptClient", FakeClient)
+        payload = {"shop_id": shop.id, "country_id": site.id}
+        assert client.post("/api/tracking/headers/preview", json=payload).status_code == 403
+        wrong = client.post("/api/tracking/headers/preview", headers={"X-CSRF-Token": csrf},
+            json={**payload, "shop_id": "other-owner-shop"})
+        assert wrong.status_code == 400 and calls == []
+        preview = client.post("/api/tracking/headers/preview", headers={"X-CSRF-Token": csrf}, json=payload)
+        assert preview.status_code == 200 and len(preview.json()["signature"]) == 64
+        assert calls == ["preview"]
+        assert client.post("/api/tracking/headers/apply", headers={"X-CSRF-Token": csrf}, json=payload).status_code == 400
+
+
 def test_local_ui_assets_and_dashboard_effect_scope(tmp_path):
     app = create_app(tmp_path / "data")
     with TestClient(app) as client:
@@ -720,7 +750,7 @@ def test_routed_query_only_calls_carrier_named_in_sheet(tmp_path):
 
     assert called == [["FBA11111"]]
     assert [item.status for item in response.results] == [
-        QueryStatus.SUCCESS,
+        QueryStatus.PARTIAL,
         QueryStatus.FAILED,
         QueryStatus.FAILED,
     ]
@@ -855,8 +885,8 @@ def test_routed_query_falls_back_only_for_not_found_and_reports_conflict(
         ["FBA_FALLBACK", "FBA_CONFLICT", "FBA_INCONCLUSIVE"]
     ]
     assert [item.status for item in response.results] == [
-        QueryStatus.SUCCESS,
-        QueryStatus.SUCCESS,
+        QueryStatus.PARTIAL,
+        QueryStatus.PARTIAL,
         QueryStatus.CONFLICT,
         QueryStatus.PARTIAL,
         QueryStatus.FAILED,

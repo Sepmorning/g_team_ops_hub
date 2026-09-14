@@ -95,6 +95,8 @@ class TrackingSnapshot:
     pod_status: str = "未提供"
     data_status: str = "正常"
     updated_time: str = ""
+    # Internal write instruction; never a worksheet column. Empty does not mean cancel.
+    cancelled_plans: str = ""
 
     def to_dict(self) -> dict[str, str]:
         return {

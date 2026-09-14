@@ -8,6 +8,7 @@
   </div>
   <a class="btn" href="/shops">管理店铺配置</a>
 </header>
+<section class="card" style="margin-bottom:18px"><p>月销计算方案显示实际权重，顺序为最近7日 / 第8—14日 / 第15—30日，均先折算为30日销量。标注“低样本平滑”时，q=MIN(1,30日销量/平滑参数)，最终估算=30日销量×(1−q)+加权估算×q，最后取整。</p><p>高：默认采用，无需逐行核算；中：参考采用；低：重点复核异常原因。异常列仅显示最主要风险，不适用及正常高/中留白。手动修改销量、状态或规则后，请点击重新计算当前子表；预测与最终月销为可读文本/数字，最终月销手工调整后覆盖和补货公式即时更新；高可信度不是未来销量保证。</p></section>
 
 {% if not shops %}
 <section class="card" style="text-align:center;padding:55px 24px">
@@ -36,14 +37,16 @@
     </div>
     <div class="field">
       <label for="countrySelect">国家 / Listing 子表</label>
-      <select id="countrySelect" onchange="validateSelectedSite()"></select>
+      <select id="countrySelect" onchange="invalidatePreview();validateSelectedSite()"></select>
     </div>
     <div class="field full">
       <label>模块连接状态</label>
       <div id="connectionHint" class="status show info" style="margin:0">正在读取店铺配置…</div>
       <div class="actions" style="margin-top:10px">
         <button class="btn" type="button" onclick="setupListingRules(this)">初始化 / 检查规则配置</button>
-        <span class="muted">恢复“ListingRules”系统默认参数、逐项规则说明和标准公式；规则表保持未保护，可直接编辑。自定义规则与人工最终月销会被重置。</span>
+        <button class="btn" type="button" onclick="recalculateForecast(this)">重新计算当前子表</button>
+        <button class="btn" type="button" onclick="showForecastDetails(this)">查看计算详情</button>
+        <span class="muted">安装R3.0三窗口预测与停补约束，缺少时在已用区域右侧新增“月销计算方案”。会恢复规则表默认参数和当前子表结果及下游公式，重置人工最终月销；保留人工列及评分条件格式。</span>
       </div>
     </div>
   </div>
@@ -59,7 +62,7 @@
   <div class="form-grid">
     <div class="field">
       <label for="dataDate">本次数据日期</label>
-      <input id="dataDate" type="date">
+      <input id="dataDate" type="date" onchange="invalidatePreview()">
     </div>
     <div class="field full">
       <label for="listingFile">领星 Listing 导出文件（.xlsx）</label>
@@ -101,16 +104,21 @@
 const inventoryStatus=document.querySelector('#inventoryStatus');
 let inventoryConfig=null;
 let previewId='';
+let previewEpoch=0;
+let applyRequestKey='';
 const inventoryRequestKey=()=>globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random().toString(16).slice(2)}`;
+function invalidatePreview(){previewEpoch++;previewId='';applyRequestKey='';previewCard.classList.add('hidden')}
 
 function showInventory(message,kind='info'){GTeam.showStatus(inventoryStatus,message,kind);window.scrollTo({top:0,behavior:'smooth'})}
 function valueText(value){return value===null||value===undefined?'—':String(value)}
 
 async function loadInventoryConfig(){
-  previewId='';previewCard.classList.add('hidden');countrySelect.replaceChildren();countrySelect.disabled=true;
+  invalidatePreview();const epoch=previewEpoch;countrySelect.replaceChildren();countrySelect.disabled=true;
   GTeam.showStatus(connectionHint,'正在读取店铺和站点配置…','info');
   try{
-    inventoryConfig=await GTeam.api(`/api/inventory/config?shop_id=${encodeURIComponent(shopSelect.value)}`);
+    const config=await GTeam.api(`/api/inventory/config?shop_id=${encodeURIComponent(shopSelect.value)}`);
+    if(epoch!==previewEpoch)return;
+    inventoryConfig=config;
     const countries=inventoryConfig.countries||[];
     countries.forEach(item=>{
       const option=document.createElement('option');
@@ -141,9 +149,42 @@ async function validateSelectedSite(){
   }catch(e){GTeam.showStatus(connectionHint,e.message,'error')}
 }
 
+let recalculateKey='', recalculateTarget='';
+async function recalculateForecast(button){
+  if(!shopSelect.value||!countrySelect.value)return;
+  if(!confirm('重算当前子表，并将人工最终补货月销恢复为最新系统建议？不会滚动历史数据或恢复默认规则。'))return;
+  invalidatePreview();
+  const target=shopSelect.value+'/'+countrySelect.value;
+  if(!recalculateKey||recalculateTarget!==target){recalculateKey=inventoryRequestKey();recalculateTarget=target}
+  GTeam.buttonBusy(button,true,'正在重算…');
+  try{
+    const data=await GTeam.api(`/api/inventory/countries/${countrySelect.value}/forecast/recalculate`,{method:'POST',headers:{'Idempotency-Key':recalculateKey},body:{shop_id:shopSelect.value}});
+    showInventory(data.message,'ok');recalculateKey='';
+  }catch(e){showInventory(e.message,'error')}finally{GTeam.buttonBusy(button,false)}
+}
+async function showForecastDetails(button){
+  if(!shopSelect.value||!countrySelect.value)return;
+  GTeam.buttonBusy(button,true,'正在读取…');
+  try{
+    const data=await GTeam.api(`/api/inventory/countries/${countrySelect.value}/forecast/details`,{method:'POST',body:{shop_id:shopSelect.value}});
+    let section=document.getElementById('forecastDetails');
+    if(!section){section=document.createElement('section');section.id='forecastDetails';section.className='card';button.closest('section').after(section)}
+    section.replaceChildren();
+    const title=document.createElement('h2');title.textContent='按当前共享表数据试算（未写入）';section.append(title);
+    const n=x=>typeof x==='number'?Number(x.toFixed(2)):'—';
+    for(const entry of data.entries){
+      const item=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('p');
+      summary.textContent=`${entry.msku}：${entry.values.monthly_sales_method}，建议 ${n(entry.detail.monthly)}，可信度 ${entry.values.forecast_confidence}`;
+      body.textContent=`三窗口折算月销：${entry.detail.windows.map(n).join(' / ')}；加权估算：${n(entry.detail.estimate)}；平滑响应：${n(entry.detail.response*100)}%；最终取整：${n(entry.detail.monthly)}。${entry.detail.risks.join('；')}`;
+      item.append(summary,body);section.append(item);
+    }
+  }catch(e){showInventory(e.message,'error')}finally{GTeam.buttonBusy(button,false)}
+}
+
 async function setupListingRules(button){
   if(!shopSelect.value||!countrySelect.value){showInventory('请先选择店铺和国家站点','error');return}
   if(!confirm('确认恢复“ListingRules”系统默认规则并重新安装标准公式？旧“规则配置”会自动迁移；自定义规则参数和人工填写的最终补货月销都会被重置。'))return;
+  invalidatePreview();
   GTeam.buttonBusy(button,true,'正在初始化…');
   try{
     const data=await GTeam.api(`/api/inventory/countries/${countrySelect.value}/rules/setup`,{method:'POST',body:{shop_id:shopSelect.value}});
@@ -152,18 +193,22 @@ async function setupListingRules(button){
 }
 
 function inferFileDate(){
+  invalidatePreview();
   const match=listingFile.files[0]?.name.match(/(?:^|\D)(20\d{6})(?:\D|$)/);
   if(match){dataDate.value=`${match[1].slice(0,4)}-${match[1].slice(4,6)}-${match[1].slice(6,8)}`}
 }
 
 async function previewListing(button){
+  invalidatePreview();const epoch=previewEpoch;
   if(!countrySelect.value){showInventory('请先选择已连接Listing脚本的国家站点','error');return}
   if(!listingFile.files[0]){showInventory('请选择领星导出的.xlsx文件','error');return}
   const form=new FormData();form.append('shop_id',shopSelect.value);form.append('country_id',countrySelect.value);form.append('data_date',dataDate.value);form.append('file',listingFile.files[0]);
   GTeam.buttonBusy(button,true,'读取并验证…');
   try{
-    const data=await GTeam.api('/api/inventory/imports/preview',{method:'POST',body:form});previewId=data.preview_id;
-    previewSummary.textContent=`${data.shop_name} / ${data.country_name} / ${data.sheet_name}；数据日期 ${data.data_date}；可更新 ${data.row_count} 个唯一 MSKU。下表最多展示前30行。`;
+    const data=await GTeam.api('/api/inventory/imports/preview',{method:'POST',body:form});
+    if(epoch!==previewEpoch)return;
+    previewId=data.preview_id;applyRequestKey=inventoryRequestKey();
+    previewSummary.textContent=`${data.shop_name} / ${data.country_name} / ${data.sheet_name}；数据日期 ${data.data_date}；源文件可处理 ${data.row_count} 个唯一 MSKU，实际写入还需目标匹配。下表最多展示前30行。`;
     const warnings=[];
     if(data.duplicate_mskus.length)warnings.push(`文件内重复MSKU已跳过：${data.duplicate_mskus.join('、')}`);
     if(data.skipped_rows.length)warnings.push(`无效行已跳过：${data.skipped_rows.join('；')}`);
@@ -188,7 +233,7 @@ async function applyListing(button){
   if(!previewId)return;
   if(!confirm('确认把本次数据写入所选Listing子表？同日重试只修正本次值；更晚日期会滚动上次值。'))return;
   GTeam.buttonBusy(button,true,'正在更新共享表…');
-  try{const data=await GTeam.api('/api/inventory/imports/apply',{method:'POST',headers:{'Idempotency-Key':inventoryRequestKey()},body:{preview_id:previewId}});showInventory(data.message,'ok')}
+  try{const data=await GTeam.api('/api/inventory/imports/apply',{method:'POST',headers:{'Idempotency-Key':applyRequestKey},body:{preview_id:previewId}});invalidatePreview();showInventory(data.message,'ok')}
   catch(e){showInventory(e.message,'error')}finally{GTeam.buttonBusy(button,false)}
 }
 

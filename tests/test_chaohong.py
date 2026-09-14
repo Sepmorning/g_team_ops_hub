@@ -109,7 +109,7 @@ def test_detail_timeline_and_pod_are_normalized():
         ChaoHongClient(session=session, retries=0)
     )
     details = service.fetch_tracking_details("FBA11111")
-    assert details.snapshot.pickup_time == "2026-07-01"
+    assert details.snapshot.pickup_time == ""
     assert details.snapshot.signed_time == "2026-07-20"
     assert details.snapshot.pod_status == "已提供"
     assert any(event.attachment for event in details.events)

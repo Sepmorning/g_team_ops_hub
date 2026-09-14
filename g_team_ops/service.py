@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .client import AndaClient
-from .errors import AuthenticationError, CarrierError
+from .errors import AuthenticationError, CarrierError, ResponseError
 from .models import QueryStatus, TrackingDetails, TrackingResult
 from .tracking_details import normalize_tracking_details
 
@@ -60,13 +60,21 @@ class AndaQueryService:
                 # 浏览器登录可能挤掉项目会话。自动重新登录一次，再重试本批。
                 records = self._query_batch_with_reauthentication(batch)
                 found: dict[str, dict] = {}
+                ambiguous: set[str] = set()
                 for record in records:
-                    if not isinstance(record, dict):
-                        continue
+                    if not isinstance(record, dict) or not str(record.get("fbaCode") or "").strip():
+                        raise ResponseError("安达订单返回缺少FBA字段，可能已调整接口；本批停止回填")
                     fba = str(record.get("fbaCode") or "").strip().upper()
                     if fba in batch:
+                        if fba in found:
+                            ambiguous.add(fba)
                         found[fba] = record
                 for fba in batch:
+                    if fba in ambiguous:
+                        results[fba] = TrackingResult(fba=fba, status=QueryStatus.FAILED,
+                            carrier="安达", error_category="ambiguous_order",
+                            error_message="安达返回同一FBA的多个订单，请核对货代订单后再查询")
+                        continue
                     record = found.get(fba)
                     if record is None:
                         results[fba] = TrackingResult(fba=fba, status=QueryStatus.NOT_FOUND, carrier="安达")
@@ -163,7 +171,7 @@ class AndaQueryService:
             if isinstance(values, list):
                 raw_events.extend(item for item in values if isinstance(item, dict))
         if not raw_events:
-            raw_events = self._status_events(record)
+            raise ResponseError("安达未返回完整轨迹，可能已调整接口；保留共享表原值")
 
         vessel = str(record.get("vesselName") or record.get("shipName") or "").strip()
         voyage = str(record.get("voyageNo") or record.get("voyage") or "").strip()
@@ -176,16 +184,13 @@ class AndaQueryService:
             ),
             transport_ref=" / ".join(part for part in (vessel, voyage) if part),
             structured={
-                "pickup_time": record.get("warehouseInTime")
-                or record.get("warehouseEntryTime"),
+                # Warehouse receipt is not evidence of pickup at the shipper.
+                "pickup_time": "",
                 "estimated_departure": record.get("etd"),
                 "actual_departure": record.get("atd"),
                 "estimated_arrival": record.get("eta"),
                 "actual_arrival": record.get("ata"),
                 "estimated_delivery": record.get("estimatedDeliveryTime"),
-                "last_mile_time": self._status_time(
-                    record, "ENTRYTRANSFERWAREHOUSE"
-                ),
                 "signed_time": record.get("signReceiveTime")
                 or self._status_time(record, "CLIENTSIGN"),
             },

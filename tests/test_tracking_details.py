@@ -57,7 +57,7 @@ def test_anda_timeline_separates_estimates_from_actual_milestones():
 
     snapshot = details.snapshot
     assert snapshot.transport_ref == "MATSON MAUI 038E"
-    assert snapshot.pickup_time == "2026-06-17"
+    assert snapshot.pickup_time == ""
     assert snapshot.estimated_departure == "2026-07-02"
     assert snapshot.actual_departure == "2026-07-02"
     assert snapshot.estimated_arrival == "2026-07-13"
@@ -77,7 +77,7 @@ def test_anda_timeline_separates_estimates_from_actual_milestones():
         event for event in details.events if "MATSON MAUI" in event.content
     )
     assert old_plan.validity == "已被更新"
-    assert newest_plan.validity == "部分已更新"
+    assert newest_plan.validity == "当前有效"
     assert "预计出发=2026-07-02" in newest_plan.related_plan
 
 
@@ -112,10 +112,10 @@ def test_yitong_nodes_map_to_the_same_universal_milestones():
 
     snapshot = details.snapshot
     assert snapshot.transport_ref == "TEST 001E"
-    assert snapshot.pickup_time == "2026-06-01"
+    assert snapshot.pickup_time == ""
     assert snapshot.actual_departure == "2026-06-06"
     assert snapshot.actual_arrival == "2026-06-20"
-    assert snapshot.last_mile_time == "2026-06-24"
+    assert snapshot.last_mile_time == ""
     assert snapshot.signed_time == "2026-06-28"
     assert snapshot.estimated_delivery == "2026-06-28"
 
@@ -166,7 +166,7 @@ def test_chaohong_reverse_date_wording_and_pod_signature_are_parsed():
     assert snapshot.actual_departure == "2026-04-13"
     assert snapshot.estimated_arrival == "2026-05-17"
     assert snapshot.actual_arrival == "2026-05-18"
-    assert snapshot.last_mile_time == "2026-05-21"
+    assert snapshot.last_mile_time == ""
     assert snapshot.signed_time == "2026-05-23"
     assert snapshot.pod_status == "已提供"
     assert snapshot.current_node == "签收"
@@ -182,7 +182,7 @@ def test_chaohong_reverse_date_wording_and_pod_signature_are_parsed():
     assert "预计到达=2026-05-17" in latest_eta.related_plan
 
 
-def test_last_mile_uses_latest_actual_dispatch_after_rescheduling():
+def test_last_mile_uses_first_actual_dispatch_after_rescheduling():
     details = normalize_tracking_details(
         fba="FBA_TEST_REDISPATCH",
         carrier="安达",
@@ -206,7 +206,7 @@ def test_last_mile_uses_latest_actual_dispatch_after_rescheduling():
         ],
     )
 
-    assert details.snapshot.last_mile_time == "2026-07-24"
+    assert details.snapshot.last_mile_time == "2026-07-21"
     assert details.snapshot.estimated_delivery == "2026-07-25"
 
 
@@ -227,7 +227,7 @@ def test_recovery_event_clears_an_active_exception():
     )
 
     assert details.snapshot.current_exception == ""
-    assert details.events[0].exception_status == "异常中"
+    assert details.events[0].exception_status == "已恢复或由后续记录更新"
     assert details.events[1].exception_status == "已恢复"
     assert "恢复" in details.events[1].event_type
 
@@ -236,3 +236,46 @@ def test_date_only_supports_numeric_and_chinese_dates():
     assert date_only("2026-07-20 10:00:00") == "2026-07-20"
     assert date_only("计划2026年7月21日") == "2026-07-21"
     assert date_only("只有7月21日") == ""
+
+
+def timeline(*contents, structured=None):
+    return normalize_tracking_details(fba="FBA12345", carrier="安达",
+        raw_events=[{"event_time": f"2026-07-{index + 1:02d} 10:00:00", "content": value}
+                    for index, value in enumerate(contents)], structured=structured)
+
+
+def test_forecasts_never_supply_actual_dates_or_pod():
+    snapshot = timeline("预计提货，预计开船2026-07-05，预计到港2026-07-20",
+        "预约派送，预计签收2026-07-25，POD未回传").snapshot
+    assert snapshot.estimated_departure == "2026-07-05"
+    assert snapshot.estimated_arrival == "2026-07-20"
+    assert snapshot.estimated_delivery == "2026-07-25"
+    assert not any((snapshot.pickup_time, snapshot.actual_departure,
+                    snapshot.actual_arrival, snapshot.last_mile_time, snapshot.signed_time))
+    assert snapshot.pod_status == "未提供"
+
+
+def test_actual_dates_never_supply_forecasts_and_first_dispatch_is_stable():
+    snapshot = timeline("上传箱单", "已提货", "已开船", "已到港，实际到港时间2026-07-04",
+        "已提柜", "已入海外仓", "派送中", "再次派送中", "已签收").snapshot
+    assert snapshot.pickup_time == "2026-07-02"
+    assert snapshot.last_mile_time == "2026-07-07"
+    assert not any((snapshot.estimated_departure, snapshot.estimated_arrival, snapshot.estimated_delivery))
+
+
+def test_cancelled_plan_cannot_reappear_from_structured_order_fields():
+    details = timeline("预约送仓2026-07-20", "送仓预约取消",
+        structured={"estimated_delivery": "2026-07-20"})
+    assert details.snapshot.estimated_delivery == ""
+    assert details.snapshot.cancelled_plans == "预计送达"
+    assert details.events[0].validity == "已取消"
+    snapshot = timeline("预约送仓2026-07-20", "送仓预约取消，重新预约送仓2026-07-22").snapshot
+    assert snapshot.estimated_delivery == "2026-07-22"
+    assert snapshot.cancelled_plans == ""
+
+
+def test_release_only_resolves_customs_and_estimate_cannot_resolve_it():
+    snapshot = timeline("起运港海关查验", "货物丢失", "预计已开船2026-07-10").snapshot
+    assert "查验" in snapshot.current_exception and "丢失" in snapshot.current_exception
+    snapshot = timeline("起运港海关查验", "货物丢失", "查验完成，已报关放行").snapshot
+    assert snapshot.current_exception == "货物丢失"
