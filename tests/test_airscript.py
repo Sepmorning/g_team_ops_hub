@@ -55,7 +55,7 @@ def config(token="placeholder-airscript-token"):
 def finished(result):
     if isinstance(result, dict) and result.get("success") is True:
         result = {
-            "schemaVersion": 13,
+            "schemaVersion": 14,
             "detailSheetName": "US-轨迹明细",
             **result,
         }
@@ -127,7 +127,7 @@ def test_dynamic_country_sheet_names_and_workbook_discovery_are_forwarded():
                 body=finished(
                     {
                         "success": True,
-                        "schemaVersion": 13,
+                        "schemaVersion": 14,
                         "sheets": [
                             {"id": "listing", "name": "纯粹-加拿大"},
                             {"id": "main", "name": "CA-FBA"},
@@ -156,7 +156,7 @@ def test_validate_accepts_json_string_result():
     result = json.dumps(
         {
             "success": True,
-            "schemaVersion": 13,
+            "schemaVersion": 14,
             "detailSheetName": "US-轨迹明细",
             "sheetName": "US-FBA",
             "columns": {
@@ -432,14 +432,15 @@ def test_rich_sync_batches_are_kept_small():
     ] == [AIRSCRIPT_RICH_WRITE_BATCH_SIZE, 1, 0]
 
 
-def test_old_airscript_schema_is_rejected_with_upgrade_message():
+@pytest.mark.parametrize("schema_version", [2, 13])
+def test_old_airscript_schema_is_rejected_with_upgrade_message(schema_version):
     body = {
         "status": "finished",
         "error": "",
         "data": {
             "result": {
                 "success": True,
-                "schemaVersion": 2,
+                "schemaVersion": schema_version,
                 "detailSheetName": "物流轨迹明细",
                 "sheetName": "US-FBA",
                 "columns": {
@@ -452,7 +453,7 @@ def test_old_airscript_schema_is_rejected_with_upgrade_message():
         },
     }
     client = AirScriptClient(config(), session=FakeSession([FakeResponse(body=body)]))
-    with pytest.raises(ResponseError, match="版本过旧"):
+    with pytest.raises(ResponseError, match="物流结构版本14"):
         client.validate()
 
 
@@ -465,6 +466,42 @@ def test_authentication_and_script_errors_are_classified():
     client = AirScriptClient(config(), session=FakeSession([FakeResponse(body=body)]))
     with pytest.raises(ResponseError, match="FBA表头"):
         client.validate()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        finished({"success": False, "message": "不支持的操作：headers_preview"}),
+        {
+            "status": "finished",
+            "error": "ScriptError",
+            "error_details": {"msg": "不支持的操作：headers_preview"},
+        },
+    ],
+)
+def test_old_airscript_header_action_has_precise_upgrade_message(body):
+    client = AirScriptClient(config(), session=FakeSession([FakeResponse(body=body)]))
+
+    with pytest.raises(ResponseError, match="完整替换并保存物流脚本") as exc_info:
+        client.preview_headers()
+
+    assert "不要替换Listing脚本" in exc_info.value.user_message
+
+
+def test_unrelated_header_preview_error_is_preserved():
+    body = finished({"success": False, "message": "轨迹明细含合并单元格"})
+    client = AirScriptClient(config(), session=FakeSession([FakeResponse(body=body)]))
+
+    with pytest.raises(ResponseError, match="轨迹明细含合并单元格"):
+        client.preview_headers()
+
+
+def test_old_airscript_header_apply_has_precise_upgrade_message():
+    body = finished({"success": False, "message": "不支持的操作：headers_apply"})
+    client = AirScriptClient(config(), session=FakeSession([FakeResponse(body=body)]))
+
+    with pytest.raises(ResponseError, match="物流结构版本14"):
+        client.apply_headers([])
 
 
 def test_network_failure_is_retried_and_classified(monkeypatch):

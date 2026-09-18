@@ -35,8 +35,8 @@
 </section>
 <section class="card" style="margin-top:18px">
   <h2>整理物流表头</h2>
-  <p>补齐缺少的表头并设置日期格式；明细隐藏事件编号、货代订单号、官网原始状态、首次获取时间和最后确认时间，保留历史值。信息属性改称轨迹类型。签收时间已有值不覆盖，有值即完成；AMZ签收登记日期由人工维护。表头整理记入操作历史，不提供格式撤销。</p>
-  <button class="btn" id="headersButton" onclick="prepareHeaders(this)">预览需要补齐的表头</button>
+  <p>主表只补齐缺少的标准表头，不删除现有业务列。轨迹明细将只保留12个必要列，物理删除事件编号、货代订单号、官网原始状态、首次获取时间、最后确认时间以及其他非必要列，并把信息属性改称轨迹类型。签收时间已有值不覆盖，有值即完成；AMZ签收登记日期由人工维护。请先预览，确认后才会整理；物理删除的数据不提供操作历史恢复。</p>
+  <button class="btn" id="headersButton" onclick="prepareHeaders(this)">预览物流表头调整</button>
   <div id="headersStatus" class="status"></div>
 </section>
 {% endblock %}
@@ -84,9 +84,9 @@ async function prepareHeaders(btn){
   try{
     const preview=await GTeam.api('/api/tracking/headers/preview',{method:'POST',body:selection});
     if(shopSelect.value!==selection.shop_id||siteSelect.value!==selection.country_id)return;
-    const description=preview.plans.map(p=>`${p.sheetName}：${p.additions.length?p.additions.map(a=>a.header).join('、'):'表头齐全'}`).join('\n');
+    const description=preview.plans.map(p=>{const changes=[];if(p.additions?.length)changes.push(`新增 ${p.additions.map(a=>a.header).join('、')}`);if(p.renames?.length)changes.push(`改名 ${p.renames.map(a=>`${a.from}→${a.header}`).join('、')}`);if(p.removals?.length)changes.push(`删除 ${p.removals.map(a=>`${a.header}（${a.column}列）`).join('、')}`);return `${p.sheetName}：${changes.length?changes.join('；'):'无需调整'}`}).join('\n');
     GTeam.showStatus(box,description,'info');
-    if(!confirm(description+'\n\n确认补齐表头、设置日期格式，并隐藏5个旧系统明细列？信息属性改称轨迹类型；原数据保留。'))return;
+    if(!confirm(description+'\n\n确认整理并设置日期格式？轨迹明细中列出的删除列及其数据会被物理删除，操作历史不能恢复这些列。'))return;
     if(!headerAttempt||headerAttempt.signature!==preview.signature)headerAttempt={signature:preview.signature,key:trackingRequestKey()};
     const result=await GTeam.api('/api/tracking/headers/apply',{method:'POST',headers:{'Idempotency-Key':headerAttempt.key},body:{...selection,signature:preview.signature}});
     headerAttempt=null;

@@ -24,7 +24,7 @@ def initialize_headers(repository, profile_id, shop_id, country_id, client, sign
     def before():
         preview = client.preview_headers()
         if header_signature(preview) != signature:
-            raise ConfigurationError("表格已发生变化，请重新预览需要补齐的表头")
+            raise ConfigurationError("表格已发生变化，请重新预览物流表头调整")
         return preview["snapshots"]
 
     try:
@@ -34,7 +34,12 @@ def initialize_headers(repository, profile_id, shop_id, country_id, client, sign
             snapshot_before=before, apply=client.apply_headers,
             snapshot_after=client.snapshot_targets, serialize_result=lambda value: value,
             restore_result=lambda value: value, is_partial=lambda value: False,
-            initial_summary={"action": "补齐物流表头；保留现有列，表头初始化不执行数据撤销"},
+            initial_summary={
+                "action": (
+                    "规范物流表头；主表保留现有业务列，轨迹明细仅保留12个"
+                    "必要列；本次物理删列不提供数据恢复"
+                )
+            },
         )
     finally:
         repository.set_reversible(profile_id, batch.id, False)

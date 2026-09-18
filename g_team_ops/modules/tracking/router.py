@@ -97,10 +97,14 @@ def build_router(ctx: WebContext) -> APIRouter:
             signature = str(payload.get("signature") or "")
             request_key = str(request.headers.get("Idempotency-Key") or "")
             if len(signature) != 64 or not request_key:
-                return json_error("请先预览物流表头，再确认补齐")
+                return json_error("请先预览物流表头，再确认整理")
             result = await asyncio.to_thread(initialize_headers, ctx.operations, account.id,
                 shop_id, country_id, client, signature, request_key)
-            return {"ok": True, "message": "物流表头已补齐，现有列和数据已保留", "operation_id": result.batch.id}
+            return {
+                "ok": True,
+                "message": "物流表头已整理；轨迹明细现在仅保留12个必要列",
+                "operation_id": result.batch.id,
+            }
         except (CarrierError, ConfigurationError) as exc:
             return json_error(exc.user_message)
         except Exception:

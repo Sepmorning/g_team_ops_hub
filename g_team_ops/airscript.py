@@ -21,7 +21,7 @@ DEFAULT_DETAIL_SHEET_NAME = "US-轨迹明细"
 AIRSCRIPT_WRITE_BATCH_SIZE = 50
 AIRSCRIPT_RICH_WRITE_BATCH_SIZE = 10
 AIRSCRIPT_CHANGE_BATCH_SIZE = 300
-REQUIRED_AIRSCRIPT_SCHEMA_VERSION = 13
+REQUIRED_AIRSCRIPT_SCHEMA_VERSION = 14
 
 
 def parse_share_file_id(share_url: str) -> str:
@@ -259,21 +259,32 @@ class AirScriptClient:
                 else target
                 for target in argv["preconditions"]
             ]
-        return execute_airscript_request(
-            session=self.session,
-            webhook_url=self.config.webhook_url,
-            api_token=self.config.api_token,
-            argv=argv,
-            timeout=self.timeout,
-            # A lost response does not prove that a write did not happen.
-            retries=0 if action in {"sync", "sync_tracking", "organize", "headers_apply", "apply_changes"} else self.retries,
-            service_name="AirScript",
-            required_schema_version=REQUIRED_AIRSCRIPT_SCHEMA_VERSION,
-            upgrade_message=(
-                "WPS中的AirScript版本过旧；请按《AirScript升级说明》替换为"
-                "项目内最新脚本后重新验证店铺"
-            ),
-        )
+        try:
+            return execute_airscript_request(
+                session=self.session,
+                webhook_url=self.config.webhook_url,
+                api_token=self.config.api_token,
+                argv=argv,
+                timeout=self.timeout,
+                # A lost response does not prove that a write did not happen.
+                retries=0 if action in {"sync", "sync_tracking", "organize", "headers_apply", "apply_changes"} else self.retries,
+                service_name="AirScript",
+                required_schema_version=REQUIRED_AIRSCRIPT_SCHEMA_VERSION,
+                upgrade_message=(
+                    "WPS中的物流AirScript版本过旧；请用项目目录中的"
+                    "airscripts\\FBA物流自动回填.js（物流结构版本14）完整替换并保存"
+                    "物流脚本后重新验证店铺"
+                ),
+            )
+        except ResponseError as exc:
+            message = exc.user_message
+            if action in {"headers_preview", "headers_apply"} and "不支持的操作" in message:
+                raise ResponseError(
+                    "当前店铺连接的物流AirScript不支持表头整理，仍是旧版或连接了错误脚本。"
+                    "请用项目目录中的airscripts\\FBA物流自动回填.js（物流结构版本14）"
+                    "完整替换并保存物流脚本，再重新验证店铺；不要替换Listing脚本。"
+                ) from exc
+            raise
 
     def validate(self) -> AirScriptBinding:
         result = self._execute("validate", [])

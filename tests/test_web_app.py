@@ -8,7 +8,7 @@ from g_team_ops.airscript import (
     AirScriptSyncSummary,
     PendingTrackingItem,
 )
-from g_team_ops.errors import NetworkError
+from g_team_ops.errors import NetworkError, ResponseError
 from g_team_ops.storage import ProjectDatabase
 from g_team_ops.web.app import create_app
 from g_team_ops.web.services import (
@@ -58,7 +58,12 @@ def test_web_setup_login_and_private_pages(tmp_path):
     with TestClient(app) as client:
         assert client.get("/").url.path == "/setup"
         bootstrap_and_login(client)
-        assert "物流查询" in client.get("/tracking").text
+        tracking_page = client.get("/tracking").text
+        assert "物流查询" in tracking_page
+        assert "预览物流表头调整" in tracking_page
+        assert "轨迹明细将只保留12个必要列" in tracking_page
+        assert "物理删除的数据不提供操作历史恢复" in tracking_page
+        assert "p.removals?.length" in tracking_page
         assert "货代连接" in client.get("/carriers").text
         assert "我的店铺" in client.get("/shops").text
         assert "请先添加店铺" in client.get("/inventory").text
@@ -94,6 +99,50 @@ def test_tracking_header_endpoints_require_csrf_and_owned_shop(tmp_path, monkeyp
         assert preview.status_code == 200 and len(preview.json()["signature"]) == 64
         assert calls == ["preview"]
         assert client.post("/api/tracking/headers/apply", headers={"X-CSRF-Token": csrf}, json=payload).status_code == 400
+
+
+def test_tracking_header_preview_returns_airscript_upgrade_error(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    app = create_app(data_dir)
+    with TestClient(app) as client:
+        csrf = bootstrap_and_login(client)
+        account = app.state.users.list_users()[0]
+        database = ProjectDatabase(data_dir / "app.db", account.id)
+        shop = database.save_shop(
+            "测试店铺",
+            AirScriptConfig(
+                "https://www.kdocs.cn/l/store",
+                "https://www.kdocs.cn/api/v3/ide/file/f/script/s/sync_task",
+                "test-token",
+            ),
+        )
+        site = database.save_shop_country(
+            shop.id,
+            "美国",
+            "测试-美国",
+            country_code="US",
+            fba_sheet_name="US-FBA",
+            detail_sheet_name="US-轨迹明细",
+        )
+
+        class FakeClient:
+            def __init__(self, config, retries=0):
+                pass
+
+            def preview_headers(self):
+                raise ResponseError("请完整替换并保存物流脚本")
+
+        monkeypatch.setattr(
+            "g_team_ops.modules.tracking.router.AirScriptClient", FakeClient
+        )
+        response = client.post(
+            "/api/tracking/headers/preview",
+            headers={"X-CSRF-Token": csrf},
+            json={"shop_id": shop.id, "country_id": site.id},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["message"] == "请完整替换并保存物流脚本"
 
 
 def test_local_ui_assets_and_dashboard_effect_scope(tmp_path):

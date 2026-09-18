@@ -17,26 +17,66 @@ def test_header_initialization_is_audited_idempotent_and_not_reversible(tmp_path
 
     class Client:
         writes = 0
-        headers = ["人工备注"]
+        main_headers = ["人工备注"]
+        detail_headers = ["事件编号", "FBA号", "物流轨迹原文"]
+        detail_guard = {"rows": 1, "hash1": 100, "hash2": 200}
+
+        def snapshots(self):
+            return [
+                {
+                    "targetType": "tracking_headers",
+                    "sheetName": "FBA",
+                    "matchValue": "__headers__",
+                    "itemKey": "__headers__",
+                    "field": "__headers__",
+                    "value": list(self.main_headers),
+                },
+                {
+                    "targetType": "tracking_headers",
+                    "sheetName": "轨迹明细",
+                    "matchValue": "__headers__",
+                    "itemKey": "__headers__",
+                    "field": "__headers__",
+                    "value": list(self.detail_headers),
+                },
+                {
+                    "targetType": "tracking_table_guard",
+                    "sheetName": "轨迹明细",
+                    "matchValue": "__detail_guard__",
+                    "itemKey": "__detail_guard__",
+                    "field": "__table_guard__",
+                    "value": dict(self.detail_guard),
+                },
+            ]
 
         def preview_headers(self):
-            return {"plans": [{"sheetName": "FBA", "additions": ["FBA号"]}],
-                "snapshots": [{"targetType": "tracking_headers", "sheetName": "FBA",
-                    "matchValue": "__headers__", "itemKey": "__headers__", "field": "__headers__",
-                    "value": list(self.headers)}]}
+            return {
+                "plans": [
+                    {"sheetName": "FBA", "additions": ["FBA号"]},
+                    {
+                        "sheetName": "轨迹明细",
+                        "removals": ["事件编号"],
+                    },
+                ],
+                "snapshots": self.snapshots(),
+            }
 
         def apply_headers(self, before):
             self.writes += 1
-            self.headers.append("FBA号")
+            self.main_headers.append("FBA号")
+            self.detail_headers = ["FBA号", "物流轨迹原文"]
+            self.detail_guard = {"rows": 1, "hash1": 300, "hash2": 400}
             return {"success": True}
 
         def snapshot_targets(self, targets):
-            return self.preview_headers()["snapshots"]
+            return self.snapshots()
 
     client = Client()
     signature = header_signature(client.preview_headers())
     result = initialize_headers(repository, "owner", "shop", "US", client, signature, "header-test")
-    assert repository.get_batch("owner", result.batch.id).reversible is False
+    saved = repository.get_batch("owner", result.batch.id)
+    assert saved.reversible is False
+    assert len(repository.details("owner", result.batch.id).changes) == 3
     assert repository.get_batch("other", result.batch.id) is None
     repeated = initialize_headers(repository, "owner", "shop", "US", client, signature, "header-test")
     assert repeated.reused and client.writes == 1

@@ -12,14 +12,16 @@ AIRSCRIPT_PATH = (
 )
 
 
-def test_logistics_airscript_highlights_only_current_business_changes():
+def test_logistics_airscript_highlights_only_current_business_changes(
+    tmp_path: Path,
+):
     node = os.environ.get("FBA_TEST_NODE") or shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the AirScript behavior harness")
 
     harness = r"""
 const fs = require("fs");
-const source = fs.readFileSync(process.argv[1], "utf8");
+const source = fs.readFileSync(process.argv[2], "utf8");
 
 function columnNumber(name) {
     let result = 0;
@@ -44,7 +46,12 @@ class FakeSheet {
                 this._cell(rowIndex + 1, columnIndex + 1).value = value;
             });
         });
-        this.UsedRange = { Row: 1, Rows: { Count: rows.length } };
+        this.UsedRange = {
+            Row: 1,
+            Column: 1,
+            Rows: { Count: Math.max(1, rows.length) },
+            Columns: { Count: Math.max(1, ...rows.map(row => row.length)) }
+        };
     }
 
     _cell(row, column) {
@@ -86,6 +93,26 @@ class FakeSheet {
         );
     }
 
+    _deleteColumns(startColumn, endColumn) {
+        const count = endColumn - startColumn + 1;
+        const shifted = new Map();
+        for (const [key, cell] of this._cells.entries()) {
+            const [rowText, columnText] = key.split(":");
+            const row = Number(rowText);
+            const column = Number(columnText);
+            if (column < startColumn) {
+                shifted.set(key, cell);
+            } else if (column > endColumn) {
+                shifted.set(row + ":" + (column - count), cell);
+            }
+        }
+        this._cells = shifted;
+        this.UsedRange.Columns.Count = Math.max(
+            1,
+            this.UsedRange.Columns.Count - count
+        );
+    }
+
     Range(address) {
         const sheet = this;
         const parts = address.split(":");
@@ -121,6 +148,10 @@ class FakeSheet {
                 sheet.UsedRange.Rows.Count = Math.max(
                     sheet.UsedRange.Rows.Count,
                     end.row
+                );
+                sheet.UsedRange.Columns.Count = Math.max(
+                    sheet.UsedRange.Columns.Count,
+                    end.column
                 );
             }
         });
@@ -162,7 +193,9 @@ class FakeSheet {
         range.EntireRow = {
             Delete() { sheet._deleteRows(start.row, end.row); }
         };
-        range.EntireColumn = {};
+        range.EntireColumn = {
+            Delete() { sheet._deleteColumns(start.column, end.column); }
+        };
         Object.defineProperty(range.EntireColumn, "Hidden", {
             set(value) { sheet._cell(1, start.column).hidden = value; }
         });
@@ -182,10 +215,9 @@ const mainRow = [
     "", "", "", "", "", "", "", "", "正常", "2026-07-29 10:00:00"
 ];
 const detailHeaders = [
-    "事件编号", "FBA号", "货代", "货代订单号", "轨迹发生时间", "标准阶段",
-    "标准节点", "信息属性", "物流轨迹原文", "涉及计划", "有效状态",
-    "异常状态", "运输信息", "官网原始状态", "首次获取时间",
-    "最后确认时间", "系统更新时间"
+    "FBA号", "货代", "轨迹发生时间", "标准阶段", "标准节点", "轨迹类型",
+    "物流轨迹原文", "涉及计划", "有效状态", "异常状态", "运输信息",
+    "系统更新时间"
 ];
 
 const mainSheet = new FakeSheet("US-FBA", [mainHeaders, mainRow]);
@@ -276,10 +308,8 @@ function excelSerial(dateTime) {
 const detailTimestamp = "2026-07-30 10:00:00";
 const detailMainRow = mainRow.slice();
 const detailExistingRow = [
-    "event-1", "FBA12345", "安达", "ORDER-1",
-    excelSerial("2026-07-29 09:00:00"), "干线运输", "实际到达", "实际",
-    "已到港", "", "有效", "", "", "已到港",
-    excelSerial(detailTimestamp), excelSerial(detailTimestamp),
+    "FBA12345", "安达", excelSerial("2026-07-29 09:00:00"),
+    "干线运输", "实际到达", "实际", "已到港", "", "有效", "", "",
     excelSerial(detailTimestamp)
 ];
 const compareMainSheet = new FakeSheet("US-FBA", [
@@ -293,10 +323,10 @@ const compareDetailSheet = new FakeSheet(
     [
         detailHeaders,
         detailExistingRow,
-        ["event-active-failed", "FBA77777", "安达", "", "", "", "", "", "旧轨迹"],
-        ["event-completed", "FBA99999", "安达", "", "", "", "", "", "已完成轨迹"],
-        ["event-orphan", "FBA88888", "安达", "", "", "", "", "", "已移除货件"],
-        ["manual-note", "说明", "", "", "", "", "", "", "人工说明行"]
+        ["FBA77777", "安达", "", "", "", "", "旧轨迹"],
+        ["FBA99999", "安达", "", "", "", "", "已完成轨迹"],
+        ["FBA88888", "安达", "", "", "", "", "已移除货件"],
+        ["说明", "", "", "", "", "", "人工说明行"]
     ]
 );
 const compareSheets = [compareMainSheet, compareDetailSheet];
@@ -338,15 +368,13 @@ function syncDetail(event) {
 }
 const detailSame = syncDetail(detailEvent);
 const detailDatesAfterSame = {
-    lastConfirmed: compareDetailSheet.cell("P2").value,
-    updatedAt: compareDetailSheet.cell("Q2").value
+    updatedAt: compareDetailSheet.cell("L2").value
 };
 const detailChanged = syncDetail(Object.assign({}, detailEvent, {
     validity: "已被更新"
 }));
 const detailDatesAfterChanged = {
-    lastConfirmed: compareDetailSheet.cell("P2").value,
-    updatedAt: compareDetailSheet.cell("Q2").value
+    updatedAt: compareDetailSheet.cell("L2").value
 };
 
 const recoveryMainSheet = new FakeSheet("US-FBA", [mainHeaders, mainRow.slice()]);
@@ -486,27 +514,112 @@ const rowRestore = executeWith(rowApplication, {
     direction: "rollback"
 });
 const detailFbasAfterCleanup = [
-    compareDetailSheet.cell("B2").value,
-    compareDetailSheet.cell("B3").value,
-    compareDetailSheet.cell("B4").value
+    compareDetailSheet.cell("A2").value,
+    compareDetailSheet.cell("A3").value,
+    compareDetailSheet.cell("A4").value
 ];
-// Header setup appends after custom columns and never alters manual business data.
+// Header setup preserves main-sheet business columns and migrates detail to 12 columns.
 const headerMain = new FakeSheet("US-FBA", [["自定义", "FBA号", "AMZ签收登记日期"], ["保留", "FBA12345", "2026-08-01"]]);
-const headerDetail = new FakeSheet("US-轨迹明细", [["人工备注"], ["保留明细"]]);
+const legacyDetailHeaders = [
+    "事件编号", "FBA号", "货代", "货代订单号", "轨迹发生时间", "标准阶段",
+    "标准节点", "信息属性", "物流轨迹原文", "涉及计划", "有效状态",
+    "异常状态", "运输信息", "官网原始状态", "首次获取时间",
+    "最后确认时间", "系统更新时间", "人工备注"
+];
+const legacyDetailRow = [
+    "legacy-id", "FBA12345", "安达", "ORDER-1", "2026-08-01 10:00:00",
+    "接收", "已受理", "实际", "订单已受理", "", "当前有效", "无异常",
+    "", "已受理", "2026-08-01 10:01:00", "2026-08-01 10:02:00",
+    "2026-08-01 10:03:00", "应删除"
+];
+const headerDetail = new FakeSheet("US-轨迹明细", [legacyDetailHeaders, legacyDetailRow]);
 const headerApp = { Sheets: { Count: 2, Item(i) { return [headerMain, headerDetail][i - 1]; } } };
 const headerArgs = {sheet_name:"US-FBA",detail_sheet_name:"US-轨迹明细",items:[]};
 const headerPreview = executeWith(headerApp, {...headerArgs, action:"headers_preview"});
 const headerOriginal = [headerMain.cell("A1").value, headerMain.cell("C1").value, headerMain.cell("A2").value, headerMain.cell("C2").value];
+let headerDataConflict = false;
+headerDetail.cell("I2").value = "订单未受理";
+try { executeWith(headerApp, {...headerArgs, action:"headers_apply", preconditions:headerPreview.snapshots}); } catch(e) { headerDataConflict = e.message.includes("预览后已变化"); }
+headerDetail.cell("I2").value = "订单已受理";
 executeWith(headerApp, {...headerArgs, action:"headers_apply", preconditions:headerPreview.snapshots});
 const headerRemaining = executeWith(headerApp, {...headerArgs, action:"headers_preview"});
 const headerPreserved = [headerMain.cell("A1").value, headerMain.cell("C1").value, headerMain.cell("A2").value, headerMain.cell("C2").value];
+const migratedDetailHeaders = Array.from({length:12},(_,index)=>headerDetail._cell(1,index+1).value);
+const migratedDetailRow = Array.from({length:12},(_,index)=>headerDetail._cell(2,index+1).value);
 let headerConflict = false;
 try { executeWith(headerApp, {...headerArgs, action:"headers_apply", preconditions:headerPreview.snapshots}); } catch(e) { headerConflict = true; }
 
-// Organize active FBA groups in main-sheet order, retaining failed-query details and custom values.
+const duplicateLegacyRow = legacyDetailRow.slice();
+duplicateLegacyRow[0] = "legacy-id-with-other-attachment";
+duplicateLegacyRow[16] = "2026-08-01 11:00:00";
+const duplicateDetail = new FakeSheet(
+    "US-轨迹明细",
+    [legacyDetailHeaders, legacyDetailRow, duplicateLegacyRow]
+);
+const duplicateHeaderApp = {
+    Sheets: {
+        Count: 2,
+        Item(i) { return [new FakeSheet("US-FBA", [mainHeaders]), duplicateDetail][i - 1]; }
+    }
+};
+let duplicateMigrationBlocked = false;
+try {
+    executeWith(duplicateHeaderApp, {...headerArgs, action:"headers_preview"});
+} catch(e) {
+    duplicateMigrationBlocked = e.message.includes("删除事件编号后无法区分");
+}
+const duplicateTableUnchanged = duplicateDetail.cell("A1").value === "事件编号" &&
+    duplicateDetail.cell("A3").value === "legacy-id-with-other-attachment";
+
+const missingCarrierHeaders = detailHeaders.filter(header => header !== "货代");
+const missingCarrierRow = migratedDetailRow.filter((_value, index) => index !== 1);
+const missingIdentityDetail = new FakeSheet(
+    "US-轨迹明细",
+    [missingCarrierHeaders, missingCarrierRow]
+);
+const missingIdentityApp = {
+    Sheets: {
+        Count: 2,
+        Item(i) {
+            return [
+                new FakeSheet("US-FBA", [mainHeaders]),
+                missingIdentityDetail
+            ][i - 1];
+        }
+    }
+};
+let missingIdentityMigrationBlocked = false;
+try {
+    executeWith(missingIdentityApp, {...headerArgs, action:"headers_preview"});
+} catch(e) {
+    missingIdentityMigrationBlocked =
+        e.message.includes("已有历史数据但缺少用于轨迹定位的表头：货代");
+}
+const missingIdentityTableUnchanged =
+    missingIdentityDetail.cell("A1").value === "FBA号" &&
+    missingIdentityDetail.cell("B1").value === "轨迹发生时间";
+
+const emptyIdentityDetail = new FakeSheet("US-轨迹明细", [["FBA号"]]);
+const emptyIdentityApp = {
+    Sheets: {
+        Count: 2,
+        Item(i) {
+            return [
+                new FakeSheet("US-FBA", [mainHeaders]),
+                emptyIdentityDetail
+            ][i - 1];
+        }
+    }
+};
+const emptyIdentityPreview = executeWith(
+    emptyIdentityApp,
+    {...headerArgs, action:"headers_preview"}
+);
+
+// Organize active FBA groups in main-sheet order, retaining failed-query details and row values.
 const orderMain = new FakeSheet("US-FBA", [mainHeaders,
     ["FBA22222","安达"], ["FBA11111","易通"], Object.assign(Array(20).fill(""), {0:"FBA33333",1:"超鸿",17:"已完成"})]);
-function historyRow(id,fba,time,note) { const row=Array(18).fill(""); row[0]=id;row[1]=fba;row[4]=time;row[17]=note;return row; }
+function historyRow(id,fba,time,note) { const row=Array(13).fill(""); row[0]=fba;row[1]="安达";row[2]=time;row[6]=id;row[12]=note;return row; }
 const orderDetail = new FakeSheet("US-轨迹明细", [[...detailHeaders,"人工备注"],
     historyRow("a","FBA11111","2026-07-01","一"), historyRow("b","FBA33333","2026-07-01","三"),
     historyRow("c","FBA22222","2026-07-03","后"), historyRow("d","FBA22222","2026-07-02","先")]);
@@ -514,18 +627,108 @@ const orderApp = {Sheets:{Count:2,Item(i){return [orderMain,orderDetail][i-1]}}}
 const beforeOrder = executeWith(orderApp,{...headerArgs,action:"snapshot",include_cleanup:true});
 const organized = executeWith(orderApp,{...headerArgs,action:"organize",preconditions:beforeOrder.snapshots});
 const afterOrder = executeWith(orderApp,{...headerArgs,action:"snapshot_targets",targets:beforeOrder.snapshots});
-const orderedRows = [2,3,4].map(i=>[orderDetail.cell("B"+i).value,orderDetail.cell("R"+i).value]);
+const orderedRows = [2,3,4].map(i=>[orderDetail.cell("A"+i).value,orderDetail.cell("M"+i).value]);
 const orderChanges = beforeOrder.snapshots.map((old,i)=>({...old,oldValue:old.value,newValue:afterOrder.snapshots[i].value})).filter(v=>JSON.stringify(v.oldValue)!==JSON.stringify(v.newValue));
-orderDetail.cell("R2").value="人工修改";
+orderDetail.cell("M2").value="人工修改";
 const orderConflict=executeWith(orderApp,{...headerArgs,action:"inspect_changes",changes:orderChanges,direction:"rollback"});
-orderDetail.cell("R2").value="先";
+orderDetail.cell("M2").value="先";
 const orderRestore=executeWith(orderApp,{...headerArgs,action:"apply_changes",changes:orderChanges,direction:"rollback"});
-const restoredOrder=[2,3,4,5].map(i=>orderDetail.cell("A"+i).value);
+const restoredOrder=[2,3,4,5].map(i=>orderDetail.cell("G"+i).value);
+
+// Old 17-column whole-table history can still restore the 12 retained fields.
+function legacyTableImage(content) {
+    const row = legacyDetailRow.slice(0, 17);
+    row[8] = content;
+    return {
+        headers: legacyDetailHeaders.slice(0, 17),
+        rows: [row],
+        formats: [Array(17).fill("General")]
+    };
+}
+const legacyCurrentRow = migratedDetailRow.slice();
+legacyCurrentRow[6] = "新轨迹";
+const legacyRestoreDetail = new FakeSheet("US-轨迹明细", [detailHeaders, legacyCurrentRow]);
+const legacyRestoreApp = {Sheets:{Count:2,Item(i){return [new FakeSheet("US-FBA", [mainHeaders]),legacyRestoreDetail][i-1]}}};
+const legacyTableChange = {
+    targetType: "tracking_table",
+    sheetName: "US-轨迹明细",
+    matchHeader: "事件编号",
+    matchValue: "__detail__",
+    itemKey: "__detail__",
+    field: "__table__",
+    oldValue: legacyTableImage("旧轨迹"),
+    newValue: legacyTableImage("新轨迹")
+};
+const legacyTablePreview = executeWith(legacyRestoreApp,{...headerArgs,action:"inspect_changes",changes:[legacyTableChange],direction:"rollback"});
+const legacyTableRestore = executeWith(legacyRestoreApp,{...headerArgs,action:"apply_changes",changes:[legacyTableChange],direction:"rollback"});
+const legacyTableRestoredContent = legacyRestoreDetail.cell("G2").value;
+const duplicateProjectedImage = legacyTableImage("重复轨迹");
+const duplicateProjectedRow = duplicateProjectedImage.rows[0].slice();
+duplicateProjectedRow[0] = "another-legacy-id";
+duplicateProjectedImage.rows.push(duplicateProjectedRow);
+duplicateProjectedImage.formats.push(Array(17).fill("General"));
+const duplicateRestoreChange = {
+    ...legacyTableChange,
+    oldValue: duplicateProjectedImage,
+    newValue: legacyTableImage("旧轨迹")
+};
+const duplicateRestoreBefore = [
+    legacyRestoreDetail.cell("G2").value,
+    legacyRestoreDetail.cell("G3").value
+];
+const duplicateRestorePreview = executeWith(
+    legacyRestoreApp,
+    {...headerArgs,action:"inspect_changes",changes:[duplicateRestoreChange],direction:"rollback"}
+);
+const duplicateRestoreApply = executeWith(
+    legacyRestoreApp,
+    {...headerArgs,action:"apply_changes",changes:[duplicateRestoreChange],direction:"rollback"}
+);
+const duplicateRestoreAfter = [
+    legacyRestoreDetail.cell("G2").value,
+    legacyRestoreDetail.cell("G3").value
+];
+const legacySchemaRestoreDetail = new FakeSheet(
+    "US-轨迹明细",
+    [legacyDetailHeaders.slice(0, 17), legacyTableImage("当前轨迹").rows[0]]
+);
+const legacySchemaRestoreApp = {
+    Sheets: {
+        Count: 2,
+        Item(i) {
+            return [
+                new FakeSheet("US-FBA", [mainHeaders]),
+                legacySchemaRestoreDetail
+            ][i - 1];
+        }
+    }
+};
+const legacySchemaDuplicateChange = {
+    ...legacyTableChange,
+    oldValue: duplicateProjectedImage,
+    newValue: legacyTableImage("当前轨迹")
+};
+const legacySchemaDuplicateBefore = [
+    legacySchemaRestoreDetail.cell("I2").value,
+    legacySchemaRestoreDetail.cell("I3").value
+];
+const legacySchemaDuplicatePreview = executeWith(
+    legacySchemaRestoreApp,
+    {...headerArgs,action:"inspect_changes",changes:[legacySchemaDuplicateChange],direction:"rollback"}
+);
+const legacySchemaDuplicateApply = executeWith(
+    legacySchemaRestoreApp,
+    {...headerArgs,action:"apply_changes",changes:[legacySchemaDuplicateChange],direction:"rollback"}
+);
+const legacySchemaDuplicateAfter = [
+    legacySchemaRestoreDetail.cell("I2").value,
+    legacySchemaRestoreDetail.cell("I3").value
+];
 // Emulate the deployed v11 JSON-text comparator with reordered webhook keys.
 const legacySource = source.replace(/function sameComparable\(left, right\) \{[\s\S]*?\nfunction expectedComparable/, 'function sameComparable(left, right) { return JSON.stringify(left) === JSON.stringify(right); }\nfunction expectedComparable');
 function legacyRun(args) { return new Function("Application", "Context", legacySource)(compareApplication, {argv:args}); }
 const guardArgs = {sheet_name:"US-FBA",detail_sheet_name:"US-轨迹明细",items:[]};
-const targetRow = {targetType:"row",sheetName:"US-轨迹明细",matchValue:"event-1",itemKey:"FBA12345",field:"__row__"};
+const targetRow = {targetType:"row",sheetName:"US-轨迹明细",matchValue:"legacy-event-id",itemKey:"FBA12345",field:"__row__",value:detailEvent};
 const rowGuard = legacyRun({...guardArgs,action:"snapshot_targets",targets:[targetRow]}).snapshots[0];
 function sortedKeys(value) { if(Array.isArray(value))return value.map(sortedKeys); if(value&&typeof value==="object")return Object.fromEntries(Object.keys(value).sort().map(k=>[k,sortedKeys(value[k])]));return value; }
 const reorderedGuard = sortedKeys(rowGuard);
@@ -534,11 +737,11 @@ try { legacyRun({...guardArgs,action:"sync",preconditions:[reorderedGuard]}); } 
 const normalizedGuard = {...reorderedGuard};
 delete normalizedGuard.comparableValue;
 legacyRun({...guardArgs,action:"sync",preconditions:[normalizedGuard]});
-const previousContent = compareDetailSheet.cell("I2").value;
-compareDetailSheet.cell("I2").value = "人工修改后的新轨迹";
+const previousContent = compareDetailSheet.cell("G2").value;
+compareDetailSheet.cell("G2").value = "人工修改后的新轨迹";
 let realChangeBlocked = false;
 try { legacyRun({...guardArgs,action:"sync",preconditions:[normalizedGuard]}); } catch(e) { realChangeBlocked = e.message.includes("写前快照后发生变化"); }
-compareDetailSheet.cell("I2").value = previousContent;
+compareDetailSheet.cell("G2").value = previousContent;
 // Manual signatures are authoritative; completion and cleanup are reversible.
 function assertRule(value, message) { if (!value) throw new Error(message); }
 const signMain = new FakeSheet("US-FBA", [mainHeaders,
@@ -554,7 +757,7 @@ assertRule(signPending.completionPending && signPending.fbas.length===1 && signP
 const signBefore = executeWith(signApp,{...headerArgs,action:"snapshot",include_cleanup:true});
 const signDone = executeWith(signApp,{...headerArgs,action:"sync_tracking",preconditions:signBefore.snapshots});
 assertRule(signMain.cell("P2").value==="2026-09-01" && signMain.cell("R2").value==="是", "保留人工签收并补齐完成");
-assertRule(signDone.updatedCells.some(c=>c.field==="completion") && signDetail.cell("B2").value==="FBA22222", "完成写入和明细清理必须记录");
+assertRule(signDone.updatedCells.some(c=>c.field==="completion") && signDetail.cell("A2").value==="FBA22222", "完成写入和明细清理必须记录");
 const signAfter = executeWith(signApp,{...headerArgs,action:"snapshot_targets",targets:signBefore.snapshots});
 const signChanges = signBefore.snapshots.map((s,i)=>({...s,oldValue:s.value,newValue:signAfter.snapshots[i].value})).filter((s,i)=>JSON.stringify(signBefore.snapshots[i].comparableValue)!==JSON.stringify(signAfter.snapshots[i].comparableValue));
 assertRule(signChanges.length===2 && signChanges.every(s=>s.targetType!=="tracking_inputs"), "恢复只记录完成单元格和明细");
@@ -574,23 +777,32 @@ assertRule(signatureConflict, "查询期间填写签收必须触发冲突");
 signMain.cell("P3").value="";
 const autoDone=executeWith(signApp,{...headerArgs,action:"sync_tracking",items:[autoItem],preconditions:autoBefore.snapshots});
 assertRule(signMain.cell("P3").value==="2026-09-12" && signMain.cell("R3").value==="是", "系统实际签收补空并完成");
-assertRule(signDetail.cell("B2").value==="", "系统新签收必须清理全部明细");
+assertRule(signDetail.cell("A2").value==="", "系统新签收必须清理全部明细");
 const repeatedSign=executeWith(signApp,{...headerArgs,action:"sync_tracking",items:[{...autoItem,main:{route:"签收更新",signed_time:"2026-09-14"}}]});
 assertRule(signMain.cell("P3").value==="2026-09-12", "后续系统时间不覆盖签收");
 signMain.cell("P3").value=""; signMain.cell("R3").value="";
 executeWith(signApp,{...headerArgs,action:"sync_tracking",items:[{...autoItem,main:{route:"预计签收，POD已上传",estimated_delivery:"2026-09-18",pod_status:"已提供"}}]});
 assertRule(signMain.cell("P3").value==="" && signMain.cell("R3").value==="", "预计时间和POD不能替代实际签收");
-assertRule(["A1","D1","N1","O1","P1"].every(a=>headerDetail.cell(a).value!==undefined), "表头整理没有丢失历史数据");
+assertRule(migratedDetailHeaders.length===12 && migratedDetailHeaders.every(Boolean), "表头整理必须保留12个必要列");
 
 // Audit-only event timestamps must not create a business update.
 const stableEvent={...detailEvent, validity:"已被更新", updated_at:"2026-09-15 12:00:00",last_confirmed:"2026-09-15 12:00:00"};
-const oldSystemTime=compareDetailSheet.cell("Q2").value;
+const oldSystemTime=compareDetailSheet.cell("L2").value;
 const auditOnlyEvent=executeWith(compareApplication,{...headerArgs,action:"sync_tracking",items:[{fba:"FBA12345",main:{route:"已到港"},events:[stableEvent]}]});
-assertRule(auditOnlyEvent.eventsUpdated===0 && compareDetailSheet.cell("Q2").value===oldSystemTime, "重复获取不刷新系统更新时间");
+assertRule(auditOnlyEvent.eventsUpdated===0 && compareDetailSheet.cell("L2").value===oldSystemTime, "重复获取不刷新系统更新时间");
 console.log(JSON.stringify({
     legacyOrderConflict, realChangeBlocked,
-    headerOriginal,headerPreserved,headerRemaining,headerConflict,
+    headerOriginal,headerPreserved,headerRemaining,headerConflict,headerDataConflict,
+    duplicateMigrationBlocked,duplicateTableUnchanged,
+    missingIdentityMigrationBlocked,missingIdentityTableUnchanged,
+    emptyIdentityPreview,
+    headerPreview,migratedDetailHeaders,migratedDetailRow,
     organized,orderedRows,orderConflict,orderRestore,restoredOrder,
+    legacyTablePreview,legacyTableRestore,legacyTableRestoredContent,
+    duplicateRestorePreview,duplicateRestoreApply,
+    duplicateRestoreBefore,duplicateRestoreAfter,
+    legacySchemaDuplicatePreview,legacySchemaDuplicateApply,
+    legacySchemaDuplicateBefore,legacySchemaDuplicateAfter,
     first,
     firstStyles: firstStyleSnapshot,
     second,
@@ -617,8 +829,10 @@ console.log(JSON.stringify({
     rowEventAfterRestore: rowDetailSheet.cell("A2").value
 }));
 """
+    harness_path = tmp_path / "logistics_airscript_harness.js"
+    harness_path.write_text(harness, encoding="utf-8")
     completed = subprocess.run(
-        [node, "-e", harness, str(AIRSCRIPT_PATH)],
+        [node, str(harness_path), str(AIRSCRIPT_PATH)],
         check=True,
         capture_output=True,
         text=True,
@@ -628,7 +842,7 @@ console.log(JSON.stringify({
 
     assert payload["legacyOrderConflict"] is True
     assert payload["realChangeBlocked"] is True
-    assert payload["first"]["schemaVersion"] == 13
+    assert payload["first"]["schemaVersion"] == 14
     assert payload["first"]["updated"] == ["FBA12345"]
     assert payload["first"]["auditOnly"] == []
     assert payload["first"]["formatFailures"] == []
@@ -665,11 +879,7 @@ console.log(JSON.stringify({
         "FBA77777",
         "说明",
     ]
-    assert isinstance(payload["detailDatesAfterSame"]["lastConfirmed"], (int, float))
     assert isinstance(payload["detailDatesAfterSame"]["updatedAt"], (int, float))
-    assert isinstance(
-        payload["detailDatesAfterChanged"]["lastConfirmed"], (int, float)
-    )
     assert payload["detailDatesAfterChanged"]["updatedAt"] == "2026-07-30 10:00:00"
     assert payload["recoverySync"]["updated"] == ["FBA12345"]
     assert payload["recoveryChangeCount"] == 1
@@ -682,10 +892,86 @@ console.log(JSON.stringify({
     assert len(payload["rowRestore"]["applied"]) == 1
     assert payload["rowEventAfterRestore"] == ""
     assert payload["headerPreserved"] == payload["headerOriginal"]
-    assert all(not plan["additions"] for plan in payload["headerRemaining"]["plans"])
+    assert payload["headerDataConflict"] is True
+    assert payload["duplicateMigrationBlocked"] is True
+    assert payload["duplicateTableUnchanged"] is True
+    assert payload["missingIdentityMigrationBlocked"] is True
+    assert payload["missingIdentityTableUnchanged"] is True
+    assert {
+        item["header"]
+        for item in payload["emptyIdentityPreview"]["plans"][1]["additions"]
+    } >= {"货代", "轨迹发生时间", "物流轨迹原文"}
+    assert [
+        item["targetType"] for item in payload["headerPreview"]["snapshots"]
+    ] == ["tracking_headers", "tracking_headers", "tracking_table_guard"]
+    assert all(
+        not plan["additions"] and not plan["removals"] and not plan["renames"]
+        for plan in payload["headerRemaining"]["plans"]
+    )
+    detail_plan = payload["headerPreview"]["plans"][1]
+    assert [item["header"] for item in detail_plan["removals"]] == [
+        "事件编号",
+        "货代订单号",
+        "官网原始状态",
+        "首次获取时间",
+        "最后确认时间",
+        "人工备注",
+    ]
+    assert detail_plan["renames"] == [
+        {
+            "field": "event_type",
+            "from": "信息属性",
+            "header": "轨迹类型",
+            "column": 8,
+        }
+    ]
+    assert payload["migratedDetailHeaders"] == [
+        "FBA号",
+        "货代",
+        "轨迹发生时间",
+        "标准阶段",
+        "标准节点",
+        "轨迹类型",
+        "物流轨迹原文",
+        "涉及计划",
+        "有效状态",
+        "异常状态",
+        "运输信息",
+        "系统更新时间",
+    ]
+    assert payload["migratedDetailRow"] == [
+        "FBA12345",
+        "安达",
+        "2026-08-01 10:00:00",
+        "接收",
+        "已受理",
+        "实际",
+        "订单已受理",
+        "",
+        "当前有效",
+        "无异常",
+        "",
+        "2026-08-01 10:03:00",
+    ]
     assert payload["headerConflict"] is True
     assert payload["organized"]["detailRowsRemoved"] == 1
     assert payload["orderedRows"] == [["FBA22222", "先"], ["FBA22222", "后"], ["FBA11111", "一"]]
     assert len(payload["orderConflict"]["conflicts"]) == 1
     assert len(payload["orderRestore"]["applied"]) == 1
     assert payload["restoredOrder"] == ["a", "b", "c", "d"]
+    assert len(payload["legacyTablePreview"]["ready"]) == 1
+    assert len(payload["legacyTableRestore"]["applied"]) == 1
+    assert payload["legacyTableRestoredContent"] == "旧轨迹"
+    assert len(payload["duplicateRestorePreview"]["failures"]) == 1
+    assert "投影后存在无法区分的重复轨迹" in payload[
+        "duplicateRestorePreview"
+    ]["failures"][0]["message"]
+    assert payload["duplicateRestoreApply"]["applied"] == []
+    assert len(payload["duplicateRestoreApply"]["failures"]) == 1
+    assert payload["duplicateRestoreAfter"] == payload["duplicateRestoreBefore"]
+    assert len(payload["legacySchemaDuplicatePreview"]["failures"]) == 1
+    assert payload["legacySchemaDuplicateApply"]["applied"] == []
+    assert len(payload["legacySchemaDuplicateApply"]["failures"]) == 1
+    assert payload["legacySchemaDuplicateAfter"] == payload[
+        "legacySchemaDuplicateBefore"
+    ]
